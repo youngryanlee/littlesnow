@@ -3,8 +3,8 @@ import logging
 from typing import Dict, List
 import time
 
-from ..adapter.base import BaseAdapter
-from ..core.base_adapter import BaseMarketAdapter
+from ..adapter.adapter_interface import BaseMarketAdapter
+from ..adapter.base_adapter import BaseAdapter
 
 logger = logging.getLogger(__name__)
 

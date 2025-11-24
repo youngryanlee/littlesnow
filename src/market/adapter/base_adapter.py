@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from ..core.base_adapter import BaseMarketAdapter
+from .adapter_interface import BaseMarketAdapter
 from ..core.data_models import MarketData, ExchangeType
 
 class BaseAdapter(BaseMarketAdapter):

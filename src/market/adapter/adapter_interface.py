@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Callable, Optional
 import asyncio
 import logging
-from .data_models import MarketData
+from ..core.data_models import MarketData
 
 logger = logging.getLogger(__name__)
 

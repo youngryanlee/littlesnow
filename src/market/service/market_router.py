@@ -3,9 +3,9 @@ from typing import Dict, List, Callable, Optional
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
-from ..adapter.base import BaseAdapter
+from ..adapter.base_adapter import BaseAdapter
 from ..core.data_models import MarketData, MarketSnapshot
-from ..core.base_adapter import BaseMarketAdapter
+from ..adapter.adapter_interface import BaseMarketAdapter
 
 logger = logging.getLogger(__name__)
 

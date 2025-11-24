@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 import aiohttp
 import json
 
-from .base import BaseAdapter
+from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector 
 from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType

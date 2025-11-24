@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from .base import BaseAdapter
+from .base_adapter import BaseAdapter
 from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType
 
 logger = logging.getLogger(__name__)
