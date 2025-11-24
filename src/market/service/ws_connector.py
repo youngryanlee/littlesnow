@@ -7,6 +7,7 @@ import subprocess
 import re
 from typing import Callable, Optional, Dict, Any
 from aiohttp import ClientSession, ClientWSTimeout, client_exceptions
+from .proxy_manager import ProxyManager
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class WebSocketConnector:
                  ping_interval: int = 30,
                  timeout: int = 10,
                  name: str = "unknown",
-                 proxy: Optional[str] = None):  # 可选的手动代理配置
+                 proxy: Optional[str] = None):
         
         self.url = url
         self.on_message = on_message
@@ -29,81 +30,13 @@ class WebSocketConnector:
         self.timeout = timeout
         self.name = name
         
-        # 代理配置优先级：手动传入 > 环境变量 > 系统代理检测
-        self.proxy = proxy or self._detect_proxy()
+        # 使用统一的代理管理器
+        self.proxy = proxy or ProxyManager.detect_proxy()
         
         self.session: Optional[aiohttp.ClientSession] = None
         self.ws: Optional[aiohttp.ClientSessionWsConnection] = None
         self.is_connected = False
         self._message_task: Optional[asyncio.Task] = None
-    
-    def _detect_proxy(self) -> Optional[str]:
-        """自动检测代理设置"""
-        # 1. 首先检查环境变量
-        env_proxy = (os.getenv('BINANCE_PROXY') or 
-                    os.getenv('HTTPS_PROXY') or 
-                    os.getenv('HTTP_PROXY') or
-                    os.getenv('ALL_PROXY'))
-        
-        if env_proxy:
-            logger.info(f"[{self.name}] 使用环境变量代理: {env_proxy}")
-            return env_proxy
-        
-        # 2. 尝试检测 macOS 系统代理
-        try:
-            system_proxy = self._get_macos_system_proxy()
-            if system_proxy:
-                logger.info(f"[{self.name}] 检测到系统代理: {system_proxy}")
-                return system_proxy
-        except Exception as e:
-            logger.debug(f"[{self.name}] 系统代理检测失败: {e}")
-        
-        logger.debug(f"[{self.name}] 未检测到代理配置")
-        return None
-    
-    def _get_macos_system_proxy(self) -> Optional[str]:
-        """获取 macOS 系统代理设置"""
-        try:
-            # 获取当前网络服务（通常是 Wi-Fi 或 Ethernet）
-            services_result = subprocess.run(
-                ['networksetup', '-listallnetworkservices'],
-                capture_output=True, text=True, timeout=5
-            )
-            
-            if services_result.returncode != 0:
-                return None
-                
-            services = [line.strip() for line in services_result.stdout.split('\n') 
-                       if line.strip() and not line.startswith('*')]
-            
-            # 检查每个服务的代理设置
-            for service in services:
-                # 检查 Web 代理 (HTTP)
-                http_proxy_result = subprocess.run(
-                    ['networksetup', '-getwebproxy', service],
-                    capture_output=True, text=True, timeout=5
-                )
-                
-                if http_proxy_result.returncode == 0 and 'Enabled: Yes' in http_proxy_result.stdout:
-                    # 解析代理服务器和端口
-                    server_line = [line for line in http_proxy_result.stdout.split('\n') 
-                                 if 'Server:' in line][0]
-                    port_line = [line for line in http_proxy_result.stdout.split('\n') 
-                               if 'Port:' in line][0]
-                    
-                    server = server_line.split(':', 1)[1].strip()
-                    port = port_line.split(':', 1)[1].strip()
-                    
-                    if server and port:
-                        proxy_url = f"http://{server}:{port}"
-                        logger.debug(f"[{self.name}] 在服务 {service} 中找到系统代理: {proxy_url}")
-                        return proxy_url
-            
-            return None
-            
-        except Exception as e:
-            logger.debug(f"[{self.name}] macOS 系统代理检测异常: {e}")
-            return None
         
     async def connect(self) -> bool:
         """建立 WebSocket 连接"""

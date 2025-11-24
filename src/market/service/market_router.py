@@ -14,7 +14,7 @@ class MarketRouter:
     
     def __init__(self):
         self.adapters: Dict[str, BaseMarketAdapter] = {}
-        self._callbacks: List[Callable[[MarketData], None]] = []
+        self.callbacks: List[Callable[[MarketData], None]] = []
         self.snapshot_callbacks: List[Callable[[MarketSnapshot], None]] = []
         self.market_data: Dict[str, Dict[str, MarketData]] = defaultdict(dict)
         self.snapshot_interval = timedelta(milliseconds=100)  # 100ms 生成快照
@@ -27,7 +27,7 @@ class MarketRouter:
         
     def add_callback(self, callback: Callable[[MarketData], None]):
         """添加市场数据回调"""
-        self._callbacks.append(callback)
+        self.callbacks.append(callback)
         
     def add_snapshot_callback(self, callback: Callable[[MarketSnapshot], None]):
         """添加快照回调"""
@@ -35,15 +35,19 @@ class MarketRouter:
         
     def _on_market_data(self, data: MarketData):
         """处理来自适配器的市场数据"""
+        logger.debug(f"🔄 MarketRouter 收到市场数据，准备调用 {len(self.callbacks)} 个回调")
         try:
             # 存储最新数据
             self.market_data[data.exchange.value][data.symbol] = data
             
             # 通知数据回调
-            for callback in self._callbacks:
+            for i, callback in enumerate(self.callbacks):
                 try:
+                    logger.debug(f"  📞 MarketRouter 调用第 {i+1} 个回调")
                     callback(data)
+                    logger.debug(f"  ✅ MarketRouter 第 {i+1} 个回调调用成功")
                 except Exception as e:
+                    logger.debug(f"  ❌ MarketRouter 第 {i+1} 个回调调用失败: {e}")
                     logger.error(f"Error in market data callback: {e}")
                     
             # 检查是否需要生成快照

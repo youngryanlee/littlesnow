@@ -19,6 +19,7 @@ class WebSocketManager:
         
     def register_adapter(self, name: str, adapter: BaseMarketAdapter):
         """注册适配器"""
+        logger.debug(f"🔧 WebSocketManager 注册适配器: {name}")
         self.adapters[name] = adapter
         self.reconnect_attempts[name] = 0
         logger.info(f"Registered adapter: {name}")

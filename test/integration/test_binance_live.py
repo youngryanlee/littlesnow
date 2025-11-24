@@ -33,11 +33,19 @@ class TestBinanceLiveConnection:
         binance = BinanceAdapter()
         ws_manager = WebSocketManager()
         market_router = MarketRouter()
+
+        # 注册适配器前先检查
+        logger.debug(f"🔍 注册适配器前 - market_router.adapters: {market_router.adapters}")
+        logger.debug(f"🔍 注册适配器前 - market_router.callbacks: {market_router.callbacks}")
         
         # 注册适配器
         ws_manager.register_adapter('binance', binance)
         market_router.register_adapter('binance', binance)
         
+        # 注册适配器后检查
+        logger.debug(f"🔍 注册适配器后 - market_router.adapters: {market_router.adapters}")
+        logger.debug(f"🔍 注册适配器后 - market_router.callbacks: {market_router.callbacks}")
+
         # 用于收集接收到的数据
         received_data = []
         
@@ -50,8 +58,14 @@ class TestBinanceLiveConnection:
                 logger.info(f"  最新价格: {data.last_price}")
             received_data.append(data)
         
+        # 添加回调前检查
+        logger.debug(f"🔍 添加回调前 - market_router.callbacks 数量: {len(market_router.callbacks)}")
+
         # 注册回调
         market_router.add_callback(on_market_data)
+
+        # 添加回调后检查
+        logger.debug(f"🔍 添加回调后 - market_router.callbacks 数量: {len(market_router.callbacks)}")
         
         try:
             # 启动 WebSocket 连接

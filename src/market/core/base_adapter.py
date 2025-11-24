@@ -12,7 +12,7 @@ class BaseMarketAdapter(ABC):
     def __init__(self, name: str):
         self.name = name
         self.is_connected = False
-        self._callbacks: List[Callable[[MarketData], None]] = []
+        self.callbacks: List[Callable[[MarketData], None]] = []
         
     @abstractmethod
     async def connect(self) -> bool:
@@ -36,16 +36,16 @@ class BaseMarketAdapter(ABC):
         
     def add_callback(self, callback: Callable[[MarketData], None]):
         """添加数据回调"""
-        self._callbacks.append(callback)
+        self.callbacks.append(callback)
         
     def remove_callback(self, callback: Callable[[MarketData], None]):
         """移除数据回调"""
-        if callback in self._callbacks:
-            self._callbacks.remove(callback)
+        if callback in self.callbacks:
+            self.callbacks.remove(callback)
             
     def _notify_callbacks(self, data: MarketData):
         """通知所有回调函数"""
-        for callback in self._callbacks:
+        for callback in self.callbacks:
             try:
                 callback(data)
             except Exception as e:
