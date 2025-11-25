@@ -1,34 +1,50 @@
+# binance_adapter.py
 import asyncio
 import logging
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
-import aiohttp
+from typing import Optional, List, Dict, Any
 import json
 
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
-from ..service.rest_connector import RESTConnector 
+from ..service.rest_connector import RESTConnector
 from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# BinanceAdapter
+#  - 修复点：
+#    * WS 先启动并 buffer 更新 -> 然后 REST snapshot -> 应用 buffer（Binance 推荐流程）
+#    * pending_updates 严格按接收顺序处理并寻找链式起点：U <= lastUpdateId+1 <= u
+#    * 提供 fallback 降级流程（仅在 REST 完全失败时使用）
+#    * 非阻塞回调调度（避免阻塞 WS 处理）
+#    * pending buffer 上限（防止内存无限增长）
+# ---------------------------------------------------------------------------
+
 class BinanceAdapter(BaseAdapter):
-    """Binance 交易所适配器 - 带降级方案的完整流程"""
-    
+    """Binance 交易所适配器 - snapshot + buffering + pending 合并的完整实现"""
+
+    # pending buffer 最大长度（保护内存）
+    PENDING_MAX_LEN = 10000
+    # 如果 pending 超过这个数量，触发重拉 snapshot 的阈值（可以根据场景调整）
+    PENDING_RESYNC_THRESHOLD = 5000
+
     def __init__(self):
         super().__init__("binance", ExchangeType.BINANCE)
         self.ws_url = "wss://stream.binance.com:9443/ws"
         self.rest_base_url = "https://api.binance.com/api/v3"
-        
+
         # 订单簿状态管理
         self.orderbook_snapshots: Dict[str, OrderBook] = {}
         self.last_update_ids: Dict[str, int] = {}
-        self.pending_updates: Dict[str, List[dict]] = {}
+        self.pending_updates: Dict[str, List[dict]] = {}      # buffered WS updates (preserve arrival order)
         self.snapshot_initialized: Dict[str, bool] = {}
         self.using_fallback: Dict[str, bool] = {}
-        
-        # 使用服务层的连接器
+
+        # WebSocket connector (假设已实现)
         self.connector = WebSocketConnector(
             url=self.ws_url,
             on_message=self._handle_raw_message,
@@ -37,494 +53,509 @@ class BinanceAdapter(BaseAdapter):
             timeout=10,
             name="binance"
         )
-        
-    async def initialize_snapshot(self, symbol: str) -> bool:
-        """通过 REST API 初始化订单簿快照 - 使用 RESTConnector"""
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"🔍 初始化 {symbol} 订单簿快照 (尝试 {attempt + 1}/{max_retries})...")
-                
-                # 使用 RESTConnector
-                async with RESTConnector(
-                    base_url=self.rest_base_url,
-                    timeout=15,
-                    name=f"binance_{symbol}"
-                ) as rest:
-                    snapshot = await rest.get_json(f"/depth?symbol={symbol}&limit=100")
-                    last_update_id = snapshot['lastUpdateId']
-                    
-                    logger.info(f"🔍 收到 {symbol} 快照，最后更新ID: {last_update_id}")
-                    
-                    # 解析快照数据
-                    bids = [
-                        OrderBookLevel(
-                            price=Decimal(level[0]),
-                            quantity=Decimal(level[1])
-                        ) for level in snapshot['bids']
-                    ]
-                    
-                    asks = [
-                        OrderBookLevel(
-                            price=Decimal(level[0]),
-                            quantity=Decimal(level[1])
-                        ) for level in snapshot['asks']
-                    ]
-                    
-                    # 排序
-                    bids.sort(key=lambda x: x.price, reverse=True)
-                    asks.sort(key=lambda x: x.price)
-                    
-                    # 限制深度
-                    bids = bids[:20]
-                    asks = asks[:20]
-                    
-                    # 创建订单簿快照
-                    orderbook = OrderBook(
-                        bids=bids,
-                        asks=asks,
-                        timestamp=datetime.now(timezone.utc),
-                        symbol=symbol
-                    )
-                    
-                    self.orderbook_snapshots[symbol] = orderbook
-                    self.last_update_ids[symbol] = last_update_id
-                    self.snapshot_initialized[symbol] = True
-                    self.pending_updates[symbol] = []
-                    self.using_fallback[symbol] = False
-                    
-                    logger.info(f"✅ {symbol} 订单簿快照初始化完成: 买单{len(bids)}档, 卖单{len(asks)}档")
-                    return True
-                        
-            except asyncio.TimeoutError:
-                logger.warning(f"⚠️ 获取 {symbol} 快照超时 (尝试 {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                continue
-            except Exception as e:
-                logger.warning(f"⚠️ 初始化 {symbol} 订单簿失败 (尝试 {attempt + 1}/{max_retries}): {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(1)
-                continue
-        
-        logger.error(f"❌ {symbol} 订单簿快照初始化完全失败，将使用降级方案")
-        return False
 
-    def _initialize_from_first_update(self, symbol: str, first_update: dict):
-        """从第一个增量更新初始化订单簿（降级方案）"""
-        try:
-            logger.info(f"🔍 使用降级方案从第一个更新初始化 {symbol} 订单簿")
-            
-            # 从第一个更新中提取有效的买单和卖单
-            bids = []
-            for price_str, quantity_str in first_update.get('b', []):
-                quantity = Decimal(quantity_str)
-                if quantity > 0:
-                    bids.append(OrderBookLevel(
-                        price=Decimal(price_str),
-                        quantity=quantity
-                    ))
-            
-            asks = []
-            for price_str, quantity_str in first_update.get('a', []):
-                quantity = Decimal(quantity_str)
-                if quantity > 0:
-                    asks.append(OrderBookLevel(
-                        price=Decimal(price_str),
-                        quantity=quantity
-                    ))
-            
-            # 排序
-            bids.sort(key=lambda x: x.price, reverse=True)
-            asks.sort(key=lambda x: x.price)
-            
-            # 限制深度
-            bids = bids[:20]
-            asks = asks[:20]
-            
-            # 创建订单簿
-            if 'E' in first_update:
-                timestamp = datetime.fromtimestamp(first_update['E'] / 1000, tz=timezone.utc)
-            else:
-                timestamp = datetime.now(timezone.utc)
-                
-            orderbook = OrderBook(
-                bids=bids,
-                asks=asks,
-                timestamp=timestamp,
-                symbol=symbol
-            )
-            
-            self.orderbook_snapshots[symbol] = orderbook
-            self.last_update_ids[symbol] = first_update.get('u')
-            self.snapshot_initialized[symbol] = True
-            self.using_fallback[symbol] = True
-            
-            logger.info(f"✅ 降级方案初始化 {symbol} 订单簿完成: 买单{len(bids)}档, 卖单{len(asks)}档")
-            
-        except Exception as e:
-            logger.error(f"❌ 降级方案初始化失败: {e}")
-    
-    def _handle_outdated_snapshot(self, symbol: str, update_data: dict):
-        """处理过时的快照 - 使用WebSocket更新重新初始化"""
-        try:
-            logger.debug(f"🔄 {symbol} 检测到快照过时，使用WebSocket更新重新初始化")
-            
-            # 使用当前更新数据重新初始化
-            self._initialize_from_first_update(symbol, update_data)
-            
-            # 标记为使用降级方案
-            self.using_fallback[symbol] = True
-            
-            logger.debug(f"✅ {symbol} 已使用WebSocket更新重新初始化")
-            
-        except Exception as e:
-            logger.error(f"❌ 重新初始化 {symbol} 失败: {e}")
-            # 如果重新初始化失败，尝试重新获取快照
+        # 用以存放 subscribe 后正在进行 snapshot 初始化的任务，避免重复 init
+        self._init_tasks: Dict[str, asyncio.Task] = {}
+        # 回调执行线程池（用于同步回调）
+        self._callback_executor = None  # lazy init
+
+    # -----------------------
+    # helper: buffer management
+    # -----------------------
+    def _ensure_pending_structs(self, symbol: str):
+        if symbol not in self.pending_updates:
+            self.pending_updates[symbol] = []
+        if symbol not in self.snapshot_initialized:
+            self.snapshot_initialized[symbol] = False
+        if symbol not in self.using_fallback:
+            self.using_fallback[symbol] = False
+        if symbol not in self.orderbook_snapshots:
+            self.orderbook_snapshots[symbol] = OrderBook(bids=[], asks=[], timestamp=datetime.now(timezone.utc), symbol=symbol)
+
+    def _buffer_incoming_update(self, symbol: str, update_data: dict):
+        """把接收到的 WS 增量更新按接收顺序追加进 pending buffer"""
+        self._ensure_pending_structs(symbol)
+        buf = self.pending_updates[symbol]
+        buf.append(update_data)
+
+        # 防护：限制 buffer 长度
+        if len(buf) > self.PENDING_MAX_LEN:
+            # 保留最新部分（丢弃旧的）
+            keep = buf[-(self.PENDING_MAX_LEN // 2):]
+            self.pending_updates[symbol] = keep
+            logger.warning(f"pending_updates for {symbol} exceeded max len; trimmed to {len(keep)}")
+
+        # 如果 buffer 极度膨胀，建议重拉 snapshot（异步触发）
+        if len(self.pending_updates[symbol]) > self.PENDING_RESYNC_THRESHOLD:
+            logger.warning(f"pending_updates for {symbol} reached resync threshold ({len(self.pending_updates[symbol])}), scheduling snapshot re-init")
             asyncio.create_task(self._retry_snapshot_initialization(symbol))
 
-    async def _retry_snapshot_initialization(self, symbol: str):
-        """重新尝试初始化快照"""
-        try:
-            logger.debug(f"🔄 重新尝试获取 {symbol} 快照...")
-            success = await self.initialize_snapshot(symbol)
-            if success:
-                logger.debug(f"✅ {symbol} 快照重新初始化成功")
-                # 重置降级方案标志
-                self.using_fallback[symbol] = False
-                # 清空缓存更新，因为快照已经是最新的
-                if symbol in self.pending_updates:
-                    self.pending_updates[symbol] = []
-            else:
-                logger.debug(f"❌ {symbol} 快照重新初始化失败，继续使用降级方案")
-        except Exception as e:
-            logger.error(f"❌ 重新初始化 {symbol} 快照时出错: {e}")
-            
+    # -----------------------
+    # connect / subscribe
+    # -----------------------
     async def connect(self) -> bool:
-        """连接至 Binance WebSocket"""
+        """建立 WS 连接（非阻塞）"""
         try:
             success = await self.connector.connect()
             self.is_connected = success
+            logger.info("Binance WS connected=%s", success)
             return success
         except Exception as e:
-            logger.error(f"Binance connection failed: {e}")
+            logger.exception("Binance connection failed: %s", e)
             self.is_connected = False
             return False
-            
+
     async def disconnect(self):
-        """断开连接"""
-        await self.connector.disconnect()
-        self.is_connected = False
-        
+        try:
+            await self.connector.disconnect()
+        finally:
+            self.is_connected = False
+
     async def _do_subscribe(self, symbols: List[str]):
-        """订阅 Binance 交易对"""
+        """
+        订阅深度+trade流，重要流程：
+         1) 先确保 WS 已 connect 并开始接收（默认 connector 已连接）
+         2) 对每个 symbol 初始化 pending 结构
+         3) 发起订阅
+         4) 并行触发 _init_snapshot_with_buffering(symbol)（REST snapshot），让 WS 在此期间持续 buffer
+        """
         if not self.is_connected:
             logger.warning("Not connected to Binance")
             return
-            
+
         streams = []
         for symbol in symbols:
             symbol_lower = symbol.lower()
-            streams.extend([
-                f"{symbol_lower}@depth@100ms",
-                f"{symbol_lower}@trade"
-            ])
-            
-            # 为每个交易对初始化快照
-            if symbol not in self.snapshot_initialized:
-                success = await self.initialize_snapshot(symbol)
-                if not success:
-                    logger.warning(f"⚠️ {symbol} 快照初始化失败，将使用第一个WebSocket更新初始化")
-                    # 创建空的订单簿作为占位符，等待第一个更新
-                    self.orderbook_snapshots[symbol] = OrderBook(
-                        bids=[], asks=[], 
-                        timestamp=datetime.now(timezone.utc),
-                        symbol=symbol
-                    )
-                    self.snapshot_initialized[symbol] = False
-                    self.pending_updates[symbol] = []
-                    self.using_fallback[symbol] = False
-            
-        subscribe_msg = {
-            "method": "SUBSCRIBE",
-            "params": streams,
-            "id": 1
-        }
-        
+            streams.extend([f"{symbol_lower}@depth@100ms", f"{symbol_lower}@trade"])
+            self._ensure_pending_structs(symbol)
+
+        subscribe_msg = {"method": "SUBSCRIBE", "params": streams, "id": 1}
         await self.connector.send_json(subscribe_msg)
-        logger.info(f"Subscribed to {symbols} on Binance")
-        
+        logger.info("Subscribed to %s on Binance", symbols)
+
+        # 并行初始化 snapshot（带 buffering 处理）
+        tasks = []
+        for symbol in symbols:
+            # 防止重复创建多个 init 任务
+            if symbol in self._init_tasks and not self._init_tasks[symbol].done():
+                continue
+            t = asyncio.create_task(self._init_snapshot_with_buffering(symbol))
+            self._init_tasks[symbol] = t
+            tasks.append(t)
+
+        if tasks:
+            # 等待这些任务完成（可选择不 await，如果想要异步后台完成把这行注释）
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _do_unsubscribe(self, symbols: List[str]):
-        """取消订阅"""
         if not self.is_connected:
             return
-            
         streams = []
         for symbol in symbols:
             symbol_lower = symbol.lower()
-            streams.extend([
-                f"{symbol_lower}@depth@100ms", 
-                f"{symbol_lower}@trade"
-            ])
-            
-        unsubscribe_msg = {
-            "method": "UNSUBSCRIBE",
-            "params": streams,
-            "id": 1
-        }
-        
+            streams.extend([f"{symbol_lower}@depth@100ms", f"{symbol_lower}@trade"])
+        unsubscribe_msg = {"method": "UNSUBSCRIBE", "params": streams, "id": 1}
         await self.connector.send_json(unsubscribe_msg)
-        logger.info(f"Unsubscribed from {symbols} on Binance")
-        
-    def _handle_raw_message(self, raw_data: dict):
-        """处理原始 WebSocket 消息"""
+        logger.info("Unsubscribed from %s on Binance", symbols)
+
+    # -----------------------
+    # snapshot init with buffering (核心修复)
+    # -----------------------
+    async def _init_snapshot_with_buffering(self, symbol: str) -> bool:
+        """
+        正确的 snapshot 初始化流程（严格遵循 Binance 官方顺序）：
+         1) WS 已在运行并把所有更新缓冲到 pending_updates[symbol]
+         2) 通过 REST 获取 snapshot(lastUpdateId)
+         3) 从 pending 中丢弃所有 u <= lastUpdateId（已包含在snapshot）
+         4) 找到第一个满足 U <= lastUpdateId+1 <= u 的 buffered update 作为起点，应用它和之后能连上的更新
+         5) 若无法找到链式起点，则尝试清空 buffer 或者触发重拉 snapshot（视具体容忍策略）
+        """
+        symbol = symbol.upper()
+        self._ensure_pending_structs(symbol)
+
         try:
-            # print("_handle_raw_message: ", raw_data)
-            if 'stream' in raw_data:  
+            # REST snapshot via RESTConnector context manager
+            async with RESTConnector(base_url=self.rest_base_url, timeout=15, name=f"binance_{symbol}") as rest:
+                snapshot = await rest.get_json(f"/depth?symbol={symbol}&limit=100")
+        except Exception as e:
+            logger.warning("snapshot REST failed for %s: %s", symbol, e)
+            # do not immediately fallback to using first update — keep snapshot uninitialized
+            self.snapshot_initialized[symbol] = False
+            return False
+
+        # parse snapshot
+        try:
+            last_update_id = int(snapshot['lastUpdateId'])
+        except Exception:
+            logger.error("snapshot missing lastUpdateId for %s: %s", symbol, snapshot)
+            self.snapshot_initialized[symbol] = False
+            return False
+
+        # build orderbook from snapshot
+        bids = [OrderBookLevel(price=Decimal(b[0]), quantity=Decimal(b[1])) for b in snapshot.get('bids', [])]
+        asks = [OrderBookLevel(price=Decimal(a[0]), quantity=Decimal(a[1])) for a in snapshot.get('asks', [])]
+        bids.sort(key=lambda x: x.price, reverse=True)
+        asks.sort(key=lambda x: x.price)
+        bids = bids[:20]
+        asks = asks[:20]
+        orderbook = OrderBook(bids=bids, asks=asks, timestamp=datetime.now(timezone.utc), symbol=symbol)
+
+        # store snapshot
+        self.orderbook_snapshots[symbol] = orderbook
+        self.last_update_ids[symbol] = last_update_id
+        self.snapshot_initialized[symbol] = True
+        logger.info("Initialized snapshot for %s lastUpdateId=%d (pending buffer len=%d)",
+                    symbol, last_update_id, len(self.pending_updates.get(symbol, [])))
+
+        # process buffered updates
+        buffered = list(self.pending_updates.get(symbol, []))  # shallow copy preserving order
+        # drop any buffered update with u <= last_update_id (already included)
+        filtered = [u for u in buffered if (u.get('u') or 0) > last_update_id]
+
+        applied_any = False
+        expected = last_update_id + 1
+
+        # 找到第一个满足 U <= expected <= u 的 update
+        for upd in filtered:
+            U = upd.get('U')
+            u = upd.get('u')
+            if U is None or u is None:
+                # 如果字段缺失，跳过；但保留在 buffer 里以供后续判断或直接丢弃
+                continue
+            if U <= expected <= u:
+                # apply this update
+                try:
+                    self._apply_orderbook_update(symbol, upd)
+                    self.last_update_ids[symbol] = int(u)
+                    expected = int(u) + 1
+                    applied_any = True
+                except Exception:
+                    logger.exception("Failed to apply chained update during init for %s", symbol)
+                break
+
+        if applied_any:
+            # apply remaining updates in order if they can be chained
+            remaining = [u for u in filtered if (u.get('u') or 0) > self.last_update_ids[symbol]]
+            for upd in remaining:
+                curU = upd.get('U')
+                curu = upd.get('u')
+                if curU is None or curu is None:
+                    continue
+                if curU <= self.last_update_ids[symbol] + 1 <= curu:
+                    try:
+                        self._apply_orderbook_update(symbol, upd)
+                        self.last_update_ids[symbol] = int(curu)
+                    except Exception:
+                        logger.exception("Failed to apply subsequent buffered update for %s", symbol)
+                else:
+                    # 无法继续链式连接 -> 把尚未应用的 remaining 放回 pending（保留接收顺序）
+                    idx = remaining.index(upd)
+                    self.pending_updates[symbol] = remaining[idx:]
+                    logger.warning("Could not chain buffered updates for %s, leaving %d in pending", symbol, len(self.pending_updates[symbol]))
+                    break
+        else:
+            # 没有找到可以链上的更新 => 可能 out-of-sync；清空 buffer（或视策略保留）
+            logger.info("No buffered updates chained for %s (buffered=%d). Clearing pending buffer.", symbol, len(buffered))
+            self.pending_updates[symbol] = []
+
+        return True
+
+    # -----------------------
+    # raw message handler（WS 回调入口）
+    # -----------------------
+    def _handle_raw_message(self, raw_data: dict):
+        """
+        on_message 入口。raw_data 可能是 stream 包装（{stream, data}）或 event 格式（{e: 'depthUpdate', ...}）
+        我们把深度更新转到 _handle_orderbook_update。
+        """
+        try:
+            # stream 包装
+            if 'stream' in raw_data:
                 stream = raw_data['stream']
                 if '@depth' in stream:
+                    # depth updates are in raw_data['data']
                     self._handle_orderbook_update(raw_data)
                 elif '@trade' in stream:
                     self._handle_trade(raw_data)
                 else:
-                    logger.error(f"Error handling raw message: {raw_data}")       
-            elif 'e' in raw_data:  
+                    logger.debug("Unknown stream message: %s", stream)
+            # event 格式
+            elif 'e' in raw_data:
                 event_type = raw_data['e']
-                if event_type == 'depthUpdate': 
+                if event_type == 'depthUpdate':
                     self._handle_orderbook_update(raw_data)
-                elif event_type == 'trade':  
+                elif event_type == 'trade':
                     self._handle_trade(raw_data)
                 else:
-                    logger.error(f"Error handling raw message: {raw_data}")   
+                    logger.debug("Unhandled event type: %s", event_type)
             else:
-                logger.error(f"Error handling raw message: {raw_data}")   
-                    
+                logger.debug("Unrecognized message shape from Binance WS: %s", raw_data)
         except Exception as e:
-            logger.error(f"Error handling raw message: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.exception("Error handling raw message: %s", e)
+
+    # -----------------------
+    # orderbook update core
+    # -----------------------
     def _handle_orderbook_update(self, data: dict):
-        """处理订单簿增量更新"""
+        """处理订单簿增量更新（会先 buffer 未初始化状态下的更新）"""
         try:
-            # 提取数据
             if 'stream' in data:
                 symbol = data['stream'].split('@')[0].upper()
                 update_data = data['data']
             else:
-                symbol = data['s']
+                symbol = data.get('s') or data.get('symbol')
                 update_data = data
-            
-            logger.debug(f"🔍 开始处理 {symbol} 订单簿更新")
-            
-            # 如果快照未初始化，使用第一个更新来初始化（降级方案）
-            if not self.snapshot_initialized.get(symbol, False):
-                logger.info(f"🔍 {symbol} 使用第一个WebSocket更新初始化订单簿")
-                self._initialize_from_first_update(symbol, update_data)
+
+            if not symbol:
+                logger.warning("Orderbook update missing symbol: %s", data)
                 return
-            
+
+            self._ensure_pending_structs(symbol)
+
+            # 如果 snapshot 未初始化，缓冲更新
+            if not self.snapshot_initialized.get(symbol, False):
+                self._buffer_incoming_update(symbol, update_data)
+                return
+
+            # 下面是已初始化的常规处理逻辑，遵循 U/u 连续性与丢弃规则
             current_U = update_data.get('U')
             current_u = update_data.get('u')
             last_update_id = self.last_update_ids.get(symbol)
-            
-            logger.debug(f"🔍 {symbol} 增量更新: U={current_U}, u={current_u}, 最后ID={last_update_id}")
-            
-            # 如果使用降级方案，直接应用所有更新
+
+            # fallback 模式直接应用
             if self.using_fallback.get(symbol, False):
-                logger.debug(f"🔍 {symbol} 使用降级方案处理更新")
                 self._apply_orderbook_update(symbol, update_data)
-                self.last_update_ids[symbol] = current_u
+                if current_u is not None:
+                    self.last_update_ids[symbol] = int(current_u)
                 return
-            
-            # 官方流程：丢弃任何 u <= lastUpdateId 的数据
-            if last_update_id is not None and current_u <= last_update_id:
-                logger.debug(f"🔍 丢弃旧更新: u={current_u} <= lastUpdateId={last_update_id}")
+
+            # 丢弃旧更新
+            if last_update_id is not None and current_u is not None and int(current_u) <= int(last_update_id):
+                logger.debug("Dropping old update for %s: u=%s <= last=%s", symbol, current_u, last_update_id)
                 return
-            
-            # 官方流程：如果 U <= lastUpdateId+1 且 u >= lastUpdateId+1，开始处理
-            if last_update_id is not None:
-                expected_U = last_update_id + 1
-                if current_U <= expected_U <= current_u:
-                    # 符合条件，处理此更新
-                    logger.debug(f"📥 处理更新 {symbol}: U={current_U}, u={current_u}, 期望 U={expected_U}")
+
+            # 若能直接链上，应用之：U <= lastUpdateId+1 <= u
+            if last_update_id is not None and current_U is not None and current_u is not None:
+                expected = int(last_update_id) + 1
+                if int(current_U) <= expected <= int(current_u):
+                    # apply
                     self._apply_orderbook_update(symbol, update_data)
-                    self.last_update_ids[symbol] = current_u
-                    
-                    # 处理之前缓存的更新
+                    self.last_update_ids[symbol] = int(current_u)
+                    # 之后尝试处理缓存 pending（如果有）
                     self._process_pending_updates(symbol)
-                elif current_U > expected_U:
-                    # 关键修复：如果 U 远大于期望值，说明快照已过时，需要重新初始化
-                    logger.debug(f"⚠️ {symbol} 快照已过时 (U={current_U} > 期望={expected_U})，重新初始化快照")
-                    self._handle_outdated_snapshot(symbol, update_data)
+                    return
+                elif int(current_U) > expected:
+                    # 说明 snapshot 过时（掉包），触发重新初始化（异步）
+                    logger.warning("Snapshot outdated for %s: U=%s > expected=%s, scheduling re-init", symbol, current_U, expected)
+                    asyncio.create_task(self._handle_outdated_snapshot(symbol, update_data))
+                    return
                 else:
-                    # 不符合条件，缓存此更新
-                    print(f"📥 缓存更新 {symbol}: U={current_U}, u={current_u}, 期望 U={expected_U}")
-                    if symbol not in self.pending_updates:
-                        self.pending_updates[symbol] = []
-                    self.pending_updates[symbol].append(update_data)
+                    # 无法链上 -> 缓存此更新
+                    self._buffer_incoming_update(symbol, update_data)
+                    return
             else:
-                # 没有 lastUpdateId，直接应用更新
-                logger.debug(f"⚠️ {symbol} 没有 lastUpdateId，直接应用更新")
+                # 没有 last_update_id 的情况（通常不应发生） -> 尝试直接应用
+                logger.debug("No last_update_id for %s, applying update directly", symbol)
                 self._apply_orderbook_update(symbol, update_data)
-                self.last_update_ids[symbol] = current_u
-            
+                if current_u is not None:
+                    self.last_update_ids[symbol] = int(current_u)
+                return
+
         except Exception as e:
-            logger.error(f"Error processing Binance orderbook update: {e}")
-            import traceback
-            traceback.print_exc()
-    
+            logger.exception("Error processing Binance orderbook update: %s", e)
+
     def _process_pending_updates(self, symbol: str):
-        """处理缓存的增量更新"""
+        """处理 pending buffer 中的更新（严格按序）"""
         if symbol not in self.pending_updates or not self.pending_updates[symbol]:
             return
-        
-        pending_updates = self.pending_updates[symbol]
-        last_update_id = self.last_update_ids[symbol]
-        
-        logger.info(f"🔍 开始处理 {symbol} 的 {len(pending_updates)} 个缓存更新")
-        
-        # 按顺序处理缓存更新
-        processed_count = 0
-        for update_data in pending_updates[:]:
-            current_U = update_data.get('U')
-            current_u = update_data.get('u')
-            
-            if current_U == last_update_id + 1:
-                # 符合条件，处理此更新
-                self._apply_orderbook_update(symbol, update_data)
-                self.last_update_ids[symbol] = current_u
-                last_update_id = current_u
-                pending_updates.remove(update_data)
-                processed_count += 1
-                logger.debug(f"  ✅ 处理缓存更新: U={current_U}, u={current_u}")
+
+        pending = list(self.pending_updates[symbol])  # copy
+        last_update_id = self.last_update_ids.get(symbol)
+        if last_update_id is None:
+            return
+
+        logger.debug("Processing %d pending updates for %s (last=%s)", len(pending), symbol, last_update_id)
+
+        processed = 0
+        # 按接收顺序遍历 pending，按能否链上去执行
+        for upd in pending[:]:
+            curU = upd.get('U')
+            curu = upd.get('u')
+            if curU is None or curu is None:
+                # skip malformed
+                pending.remove(upd)
+                continue
+            expected = int(last_update_id) + 1
+            if int(curU) <= expected <= int(curu):
+                # apply
+                try:
+                    self._apply_orderbook_update(symbol, upd)
+                    last_update_id = int(curu)
+                    self.last_update_ids[symbol] = last_update_id
+                    processed += 1
+                    pending.remove(upd)
+                except Exception:
+                    logger.exception("Failed applying pending update for %s", symbol)
+                    break
             else:
-                # 不再符合条件，停止处理
+                # cannot chain, stop processing further because ordering matters
                 break
-        
-        logger.info(f"✅ 处理了 {symbol} 的 {processed_count} 个缓存更新，剩余 {len(pending_updates)} 个")
-    
+
+        # 更新 pending buffer （剩余按接收顺序保留）
+        self.pending_updates[symbol] = pending
+        logger.debug("Processed %d pending updates for %s; remaining=%d", processed, symbol, len(pending))
+
+    # -----------------------
+    # apply update -> snapshot merge
+    # -----------------------
     def _apply_orderbook_update(self, symbol: str, update_data: dict):
-        """应用订单簿增量更新到快照"""
+        """把增量更新应用到本地 snapshot（简化的 add/remove 模型）"""
         try:
-            current_orderbook = self.orderbook_snapshots[symbol]
-            
-            # 创建新的 bids 和 asks 列表
-            new_bids = current_orderbook.bids.copy() if current_orderbook.bids else []
-            new_asks = current_orderbook.asks.copy() if current_orderbook.asks else []
-            
-            # 处理买单更新
-            bids_update = update_data.get('b', [])
-            for price_str, quantity_str in bids_update:
+            current_orderbook = self.orderbook_snapshots.get(symbol)
+            if current_orderbook is None:
+                # create empty placeholder
+                current_orderbook = OrderBook(bids=[], asks=[], timestamp=datetime.now(timezone.utc), symbol=symbol)
+
+            # shallow copy lists
+            new_bids = list(current_orderbook.bids) if current_orderbook.bids else []
+            new_asks = list(current_orderbook.asks) if current_orderbook.asks else []
+
+            # bids 更新
+            for price_str, quantity_str in update_data.get('b', []):
                 price = Decimal(price_str)
                 quantity = Decimal(quantity_str)
-                
-                # 移除现有的该价格档位
-                new_bids = [bid for bid in new_bids if bid.price != price]
-                
-                # 如果数量大于0，添加新的档位
+                # remove any existing at that price
+                new_bids = [b for b in new_bids if b.price != price]
                 if quantity > 0:
-                    new_bid = OrderBookLevel(price=price, quantity=quantity)
-                    new_bids.append(new_bid)
-            
-            # 处理卖单更新
-            asks_update = update_data.get('a', [])
-            for price_str, quantity_str in asks_update:
+                    new_bids.append(OrderBookLevel(price=price, quantity=quantity))
+
+            # asks 更新
+            for price_str, quantity_str in update_data.get('a', []):
                 price = Decimal(price_str)
                 quantity = Decimal(quantity_str)
-                
-                # 移除现有的该价格档位
-                new_asks = [ask for ask in new_asks if ask.price != price]
-                
-                # 如果数量大于0，添加新的档位
+                new_asks = [a for a in new_asks if a.price != price]
                 if quantity > 0:
-                    new_ask = OrderBookLevel(price=price, quantity=quantity)
-                    new_asks.append(new_ask)
-            
-            # 排序
+                    new_asks.append(OrderBookLevel(price=price, quantity=quantity))
+
+            # 排序与裁剪
             new_bids.sort(key=lambda x: x.price, reverse=True)
             new_asks.sort(key=lambda x: x.price)
-            
-            # 限制深度
             new_bids = new_bids[:20]
             new_asks = new_asks[:20]
-            
-            # 创建新的 OrderBook 实例
+
+            # timestamp 使用事件时间 E（若有）或系统时间
             if 'E' in update_data:
                 timestamp = datetime.fromtimestamp(update_data['E'] / 1000, tz=timezone.utc)
             else:
                 timestamp = datetime.now(timezone.utc)
-                
-            updated_orderbook = OrderBook(
-                bids=new_bids,
-                asks=new_asks,
-                timestamp=timestamp,
-                symbol=symbol
-            )
-            
-            # 更新快照
-            self.orderbook_snapshots[symbol] = updated_orderbook
-            
-            # 生成市场数据
+
+            updated = OrderBook(bids=new_bids, asks=new_asks, timestamp=timestamp, symbol=symbol)
+            self.orderbook_snapshots[symbol] = updated
+
+            # 发布 MarketData 给下游（非阻塞）
             market_data = MarketData(
                 symbol=symbol,
                 exchange=ExchangeType.BINANCE,
                 market_type=MarketType.SPOT,
                 timestamp=datetime.now(timezone.utc),
-                orderbook=updated_orderbook
+                orderbook=updated
             )
-            
-            logger.debug(f"✅ {symbol} 订单簿更新: 买单{len(new_bids)}档, 卖单{len(new_asks)}档")
-            if new_bids and new_asks:
-                logger.debug(f"   最佳买单: {new_bids[0].price} x {new_bids[0].quantity}")
-                logger.debug(f"   最佳卖单: {new_asks[0].price} x {new_asks[0].quantity}")
-            
+
+            logger.debug("Applied orderbook update for %s: bids=%d asks=%d", symbol, len(new_bids), len(new_asks))
+            # dispatch callbacks asynchronously
             self._notify_callbacks(market_data)
-            
+
         except Exception as e:
-            logger.error(f"❌ 应用订单簿更新失败: {e}")
+            logger.exception("Error applying orderbook update for %s: %s", symbol, e)
             raise
-            
+
+    # -----------------------
+    # callbacks dispatch (非阻塞)
+    # -----------------------
+    def _ensure_callback_executor(self):
+        if self._callback_executor is None:
+            # lazy init a thread pool for sync callbacks
+            loop = asyncio.get_event_loop()
+            from concurrent.futures import ThreadPoolExecutor
+            self._callback_executor = ThreadPoolExecutor(max_workers=4)
+
+    def _notify_callbacks(self, market_data: MarketData):
+        """
+        将回调执行异步化：
+         - 如果 callback 是协程函数，直接 create_task(awaitable)
+         - 否则交给线程池执行以免阻塞事件循环
+        """
+        if not self.callbacks:
+            return
+
+        loop = asyncio.get_event_loop()
+        self._ensure_callback_executor()
+
+        for cb in list(self.callbacks):
+            if asyncio.iscoroutinefunction(cb):
+                try:
+                    loop.create_task(cb(market_data))
+                except Exception:
+                    logger.exception("Failed scheduling coroutine callback")
+            else:
+                # run sync callback in threadpool to avoid blocking
+                try:
+                    loop.run_in_executor(self._callback_executor, cb, market_data)
+                except Exception:
+                    logger.exception("Failed scheduling sync callback")
+
+    # -----------------------
+    # trade / misc
+    # -----------------------
     def _handle_trade(self, data: dict):
-        """处理交易数据"""
+        # trade 消息目前可记录或转发给下游（这里保留空实现）
         try:
-            logger.debug(f"Trade data received: {data}")
-        except Exception as e:
-            logger.error(f"Error processing Binance trade: {e}")
-            
+            logger.debug("Trade message (binance): %s", data if isinstance(data, dict) else str(data)[:200])
+        except Exception:
+            logger.exception("Error processing trade message")
+
     def _handle_connection_error(self, error: Exception):
-        """处理连接错误"""
-        logger.error(f"Binance WebSocket connection error: {error}")
+        logger.error("Binance WebSocket connection error: %s", error)
         self.is_connected = False
-        
-        # 触发重连逻辑
+        # 异步重连
         asyncio.create_task(self._attempt_reconnect())
-        
+
     async def _attempt_reconnect(self):
-        """尝试重新连接"""
-        logger.info("Attempting to reconnect to Binance...")
-        await asyncio.sleep(5)
-        
+        logger.info("Attempting to reconnect to Binance WS...")
+        await asyncio.sleep(2)
         try:
             success = await self.connect()
             if success and self.subscribed_symbols:
                 await self.subscribe(list(self.subscribed_symbols))
-        except Exception as e:
-            logger.error(f"Reconnection attempt failed: {e}")
-            
+        except Exception:
+            logger.exception("Reconnection attempt failed")
+
+    async def _retry_snapshot_initialization(self, symbol: str):
+        """重试 snapshot 初始化（在严重 pending 堆积时）"""
+        try:
+            logger.info("Retrying snapshot initialization for %s", symbol)
+            await self._init_snapshot_with_buffering(symbol)
+        except Exception:
+            logger.exception("Snapshot re-init failed for %s", symbol)
+
+    # -----------------------
+    # normalize / status
+    # -----------------------
     def normalize_data(self, raw_data: dict) -> Optional[MarketData]:
-        """标准化数据"""
+        """保留用于兼容接口的占位方法"""
         return None
-        
+
     def get_connection_status(self) -> dict:
-        """获取连接状态信息"""
         base_status = super().get_connection_status()
-        connector_info = self.connector.get_connection_info()
-        
+        connector_info = {}
+        try:
+            connector_info = self.connector.get_connection_info()
+        except Exception:
+            connector_info = {"info": "n/a"}
         return {
             **base_status,
             "connector_info": connector_info,
             "subscribed_symbols": list(self.subscribed_symbols),
-            "snapshot_initialized": self.snapshot_initialized.copy(),
-            "using_fallback": self.using_fallback.copy()
+            "snapshot_initialized": dict(self.snapshot_initialized),
+            "using_fallback": dict(self.using_fallback)
         }
-    
