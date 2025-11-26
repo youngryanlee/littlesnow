@@ -1,17 +1,17 @@
 import asyncio
-import logging
 from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import aiohttp
 import json
 
+from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector
 from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class PolymarketAdapter(BaseAdapter):
     """Polymarket 预测市场适配器"""

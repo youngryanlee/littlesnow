@@ -1,9 +1,10 @@
-import logging
 from typing import Optional
+
+from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class DeribitAdapter(BaseAdapter):
     """Deribit 交易所适配器"""

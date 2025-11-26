@@ -1,13 +1,13 @@
-import logging
 from typing import Dict, List, Callable, Optional
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 
+from logger.logger import get_logger
 from ..adapter.base_adapter import BaseAdapter
 from ..core.data_models import MarketData, MarketSnapshot
 from ..adapter.adapter_interface import BaseMarketAdapter
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class MarketRouter:
     """市场数据路由器"""

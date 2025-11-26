@@ -1,14 +1,14 @@
 import asyncio
 import json
-import logging
 from decimal import Decimal
 from datetime import datetime
 from typing import Optional
 
+from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..core.data_models import MarketData, ExchangeType, MarketType
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class BybitAdapter(BaseAdapter):
     """Bybit 交易所适配器"""

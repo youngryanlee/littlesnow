@@ -1,12 +1,12 @@
 import asyncio
-import logging
 from typing import Dict, List
 import time
 
+from logger.logger import get_logger
 from ..adapter.adapter_interface import BaseMarketAdapter
 from ..adapter.base_adapter import BaseAdapter
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class WebSocketManager:
     """WebSocket 连接管理器 - 修复版本"""

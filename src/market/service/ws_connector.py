@@ -1,15 +1,16 @@
 import aiohttp
 import asyncio
-import logging
 import json
 import os
 import subprocess
 import re
 from typing import Callable, Optional, Dict, Any
 from aiohttp import ClientSession, ClientWSTimeout, client_exceptions
+
+from logger.logger import get_logger
 from .proxy_manager import ProxyManager
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 class WebSocketConnector:
     """通用的 WebSocket 连接器 - 内部自动处理代理配置"""
