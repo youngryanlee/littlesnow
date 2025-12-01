@@ -102,7 +102,7 @@ class WebSocketConnector:
             await self.ws.send_json(data)
             logger.debug(f"[{self.name}] Sent JSON message: {data}")
         else:
-            logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected")
+            logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected: {self.ws}")
             
     async def send_text(self, text: str):
         """发送文本数据"""
@@ -110,21 +110,16 @@ class WebSocketConnector:
             await self.ws.send_str(text)
             logger.debug(f"[{self.name}] Sent text message: {text}")
         else:
-            logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected")
+            logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected: {self.ws}")
             
     async def _message_loop(self):
-        """消息处理循环"""
+        """消息处理循环 - 健壮版本"""
         try:
             async for msg in self.ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    try:
-                        data = json.loads(msg.data)
-                        logger.debug(f"[{self.name}] Received message: {data}")
-                        self.on_message(data)
-                    except json.JSONDecodeError as e:
-                        logger.error(f"[{self.name}] Failed to parse JSON message: {e}")
-                    except Exception as e:
-                        logger.error(f"[{self.name}] Error processing message: {e}")
+                    
+                    # 处理各种类型的文本消息
+                    await self._handle_text_message(msg)
                         
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"[{self.name}] WebSocket error occurred")
@@ -150,6 +145,40 @@ class WebSocketConnector:
             self.is_connected = False
             if self.on_error:
                 self.on_error(e)
+
+    async def _handle_text_message(self, msg):
+        """处理文本消息"""
+        try:
+            # 处理特殊消息类型
+            if msg.data in ['PONG', 'PING']:
+                logger.debug(f"[{self.name}] Received heartbeat: {msg.data}")
+                return
+                
+            # 检查是否是空消息
+            if not msg.data or not msg.data.strip():
+                logger.debug(f"[{self.name}] Received empty message")
+                return
+                
+            # 安全解析 JSON
+            data = self._safe_json_parse(msg.data)
+            if data is not None:
+                logger.debug(f"[{self.name}] Successfully parsed message")
+                self.on_message(data)
+            else:
+                logger.warning(f"[{self.name}] Could not parse message: {msg.data[:100]}")
+                
+        except Exception as e:
+            logger.error(f"[{self.name}] Error handling text message: {e}")
+
+    def _safe_json_parse(self, message_str):
+        """安全解析 JSON 消息"""
+        try:
+            return json.loads(message_str)
+        except json.JSONDecodeError as e:
+            logger.warning(f"[{self.name}] JSON decode failed: {e}")
+            # 记录原始消息的前100个字符用于调试
+            logger.debug(f"Problematic message: {message_str[:100]}")
+            return None
                 
     def get_connection_info(self) -> Dict[str, Any]:
         """获取连接信息"""

@@ -131,7 +131,7 @@ class WebSocketManager:
         subscription_tasks = []
         for name, adapter in self.adapters.items():
             if adapter.is_connected:
-                logger.info(f"Subscribing {name} to {symbols}")
+                logger.info(f"Subscribing {name} to {symbols} using {adapter}")
                 subscription_tasks.append(adapter.subscribe(symbols))
         
         if subscription_tasks:
