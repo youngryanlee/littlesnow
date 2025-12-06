@@ -2,7 +2,7 @@ import asyncio
 import json
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Union
 import aiohttp
 from enum import Enum
 from dataclasses import dataclass
@@ -106,6 +106,7 @@ class PolymarketAdapter(BaseAdapter):
         self.subscription_status: Dict[SubscriptionType, set] = {}
 
         # 初始化连接器和状态
+        self.is_connected = False
         for sub_type in SubscriptionType:
             config = self.endpoint_configs[sub_type]
             self.connectors[sub_type] = WebSocketConnector(
@@ -197,7 +198,6 @@ class PolymarketAdapter(BaseAdapter):
             
             if all_connected:
                 self.is_connected = True
-                self._connection_established = True
                 logger.info("✅ All WebSocket endpoints connected successfully")
                 
                 # 连接成功后立即订阅已注册的交易对
@@ -212,13 +212,11 @@ class PolymarketAdapter(BaseAdapter):
             else:
                 logger.error("❌ Some WebSocket endpoints failed to connect")
                 self.is_connected = False
-                self._connection_established = False
                 return False
                 
         except Exception as e:
             logger.error(f"❌ WebSocket connection failed: {e}")
             self.is_connected = False
-            self._connection_established = False
             return False
         
     async def _start_ping(self, subscription_type: SubscriptionType):
@@ -259,7 +257,6 @@ class PolymarketAdapter(BaseAdapter):
             
             # 更新连接状态
             self.is_connected = False
-            self._connection_established = False
             
             # 清理订阅状态（可选，根据业务需求决定）
             # for sub_type in self.subscription_status:
@@ -271,7 +268,6 @@ class PolymarketAdapter(BaseAdapter):
             logger.error(f"❌ Error during disconnect: {e}")
             # 即使出错也要确保状态被重置
             self.is_connected = False
-            self._connection_established = False
             
         
     async def _do_subscribe(self, market_ids: List[str], subscription_type: SubscriptionType):
@@ -279,7 +275,7 @@ class PolymarketAdapter(BaseAdapter):
         config = self.endpoint_configs[subscription_type]
         connector = self.connectors[subscription_type]
         
-        if not connector.is_connected:
+        if not self.is_connected or not connector.is_connected:
             return
         
         # 构建订阅消息
@@ -293,7 +289,6 @@ class PolymarketAdapter(BaseAdapter):
             # 其他端点保持原有格式
             subscribe_msg = self._build_subscribe_message(market_ids, subscription_type)
             logger.info(f"📡 订阅 {subscription_type.value}: {market_ids}")
-        
         try:
             await connector.send_json(subscribe_msg)
             logger.info(f"📡 订阅 {subscription_type.value}: {market_ids}，msg: {subscribe_msg}")
@@ -305,7 +300,7 @@ class PolymarketAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"❌ {subscription_type.value} 订阅失败: {e}")
 
-    def _build_subscription_message(self, market_ids: List[str], subscription_type: SubscriptionType) -> Dict:
+    def _build_subscribe_message(self, market_ids: List[str], subscription_type: SubscriptionType) -> Dict:
         """构建订阅消息"""
         config = self.endpoint_configs[subscription_type]
         base_message = config.message_format.copy()
@@ -322,7 +317,19 @@ class PolymarketAdapter(BaseAdapter):
                 for subscription in base_message["subscriptions"]
             ]
         
-        return base_message        
+        return base_message
+
+    def _build_unsubscribe_message(self, market_ids: List[str], subscription_type: SubscriptionType) -> Dict:
+        """构建订阅消息"""
+        
+        # 根据订阅类型处理市场ID
+        if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
+            unsubscribe_msg = {
+                "type": "unsubscribe",  # 关键：这里与订阅不同
+                "markets": market_ids   # 假设参数名与订阅时相同
+            }
+        
+        return unsubscribe_msg        
 
     def _initialize_subscription_state(self, market_ids: List[str], subscription_type: SubscriptionType):
         """根据订阅类型初始化状态"""
@@ -541,9 +548,9 @@ class PolymarketAdapter(BaseAdapter):
         try:
             market_id = data['market']
             price = Decimal(data['price'])
-            quantity = Decimal(data['quantity'])
+            quantity = Decimal(data['size'])
             side = data['side']  # 'buy' or 'sell'
-            timestamp = datetime.fromtimestamp(data['timestamp'] / 1000, tz=timezone.utc)
+            timestamp = datetime.fromtimestamp(int(data['timestamp']) / 1000, tz=timezone.utc)
             
             # 创建 Trade 对象
             trade = Trade(
@@ -575,14 +582,24 @@ class PolymarketAdapter(BaseAdapter):
         """处理价格变动更新"""
         try:
             market_id = data.get('market')
+            print("_handle_price_change_update1: market_id:", market_id)
             price_changes = data.get('price_changes', [])
-            timestamp = data.get('timestamp')
+            timestamp_raw = data.get('timestamp')
             
             if not market_id or not price_changes:
                 logger.warning(f"价格变动消息缺少必要字段: market_id={market_id}, price_changes={len(price_changes)}")
                 return
                 
             logger.info(f"📊 处理价格变动消息: {market_id}, 包含 {len(price_changes)} 个资产")
+
+            # 处理时间戳
+            timestamp = None
+            if timestamp_raw:
+                try:
+                    timestamp_ms = int(timestamp_raw)
+                    timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
+                except (ValueError, TypeError):
+                    pass  # 保持 None，让 _create_market_data 使用默认时间
             
             for price_change in price_changes:
                 asset_id = price_change.get('asset_id')
@@ -596,22 +613,16 @@ class PolymarketAdapter(BaseAdapter):
                     logger.warning(f"价格变动数据不完整: {price_change}")
                     continue
                     
-                # 创建价格变动数据对象
-                price_change_data = {
-                    'market': market_id,
-                    'asset_id': asset_id,
-                    'price': price,
-                    'size': size,
-                    'side': side,
-                    'best_bid': best_bid,
-                    'best_ask': best_ask,
-                    'timestamp': timestamp,
-                    'event_type': 'price_change'
-                }
                 
                 # 生成市场数据
                 logger.debug(f"为资产 {asset_id} 生成市场数据")
-                market_data = self._create_market_data(price_change_data)
+                # 🎯 使用统一方法创建市场数据
+                market_data = self._create_market_data(
+                    market_id=market_id,
+                    last_price=price,
+                    external_timestamp=timestamp
+                )
+                print("market_data:", market_data)
                 if market_data:
                     logger.info(f"价格变动回调: {market_data}")
                     self._notify_callbacks(market_data)
@@ -646,22 +657,59 @@ class PolymarketAdapter(BaseAdapter):
         error_msg = data.get('message', 'Unknown error')
         logger.error(f"❌ WebSocket error: {error_msg}")
         
-    def _create_market_data(self, market_id: str) -> Optional[MarketData]:
-        """从订单簿快照创建市场数据"""
+    def _create_market_data(
+        self,
+        market_id: str,
+        # 可选的新参数，提供默认值以保持向后兼容
+        last_price: Optional[Union[str, Decimal]] = None,
+        last_trade: Optional[Trade] = None,
+        external_timestamp: Optional[datetime] = None
+    ) -> Optional[MarketData]:
+        """
+        创建市场数据对象。
+        若无快照，则返回None。
+        传入last_price等新参数:
+            即使没有订单簿快照，也可利用新参数创建基础MarketData。
+        """
         try:
+            # 1. 确定时间戳：优先使用外部传入的，否则用当前时间
+            timestamp = external_timestamp or datetime.now(timezone.utc)
+            
+            # 2. 获取订单簿（可能为None）
             orderbook = self.orderbook_snapshots.get(market_id)
-            if not orderbook:
-                return None
-                
-            market_data = MarketData(
+            
+            # 3. 🎯 核心逻辑：判断调用模式
+            # 情况A：传统调用，无新参数 -> 严格要求必须有订单簿
+            if last_price is None and last_trade is None:
+                if not orderbook:
+                    # 维持原有行为：无订单簿则返回None
+                    return None
+                # 有订单簿，创建传统订单簿数据
+                return MarketData(
+                    symbol=market_id,
+                    exchange=ExchangeType.POLYMARKET,
+                    market_type=MarketType.PREDICTION,
+                    timestamp=timestamp,
+                    orderbook=orderbook,
+                    # last_price 和 last_trade 默认为 None
+                )
+            
+            # 情况B：增强调用，传入了新参数 -> 允许创建不依赖订单簿的数据
+            # 处理价格
+            final_last_price = None
+            if last_price is not None:
+                final_last_price = Decimal(str(last_price))
+            
+            # 创建MarketData
+            return MarketData(
                 symbol=market_id,
                 exchange=ExchangeType.POLYMARKET,
                 market_type=MarketType.PREDICTION,
-                timestamp=datetime.now(timezone.utc),
-                orderbook=orderbook
+                timestamp=timestamp,
+                orderbook=orderbook,           # 有则附带，无则None
+                last_price=final_last_price,   # 来自新参数
+                last_trade=last_trade          # 来自新参数
             )
-            
-            return market_data
             
         except Exception as e:
             logger.error(f"❌ Error creating market data: {e}")
@@ -671,7 +719,6 @@ class PolymarketAdapter(BaseAdapter):
         """处理连接错误"""
         logger.error(f"❌ Polymarket WebSocket connection for {st} error: {error}")
         self.is_connected = False
-        self._connection_established = False
 
         # TODO: 因为是多链接，所以要关闭所有连接之后再全部重连，或者只重连自己这一个连接
         
@@ -740,7 +787,6 @@ class PolymarketAdapter(BaseAdapter):
             "name": self.name,
             "exchange": self.exchange_type.value,
             "is_connected": global_connected,  # 使用全局连接状态
-            "connection_established": self._connection_established,
             "subscribed_symbols": list(all_subscribed_markets),  # 汇总所有订阅
             "callback_count": len(self.callbacks)
         }
@@ -849,13 +895,19 @@ class PolymarketAdapter(BaseAdapter):
         new_symbols = set(symbols) - self.subscription_status[subscription_type]
         if new_symbols:
             await self._do_subscribe(list(new_symbols), subscription_type)
+            self.subscribed_symbols.update(new_symbols)
             self.subscription_status[subscription_type].update(new_symbols)
     
     async def unsubscribe(self, symbols: list, subscription_type: SubscriptionType = SubscriptionType.ORDERBOOK):
         """重写取消订阅方法以支持多连接器"""
         to_remove = set(symbols) & self.subscription_status[subscription_type]
+        print("to_remove:", to_remove)
+        print("symbols:", symbols)
         if to_remove:
             await self._do_unsubscribe(list(to_remove), subscription_type)
+            print(self.subscribed_symbols)
+            print(to_remove)
+            self.subscribed_symbols -= to_remove
             self.subscription_status[subscription_type] -= to_remove
 
     async def subscribe_orderbook(self, symbols: list):
