@@ -143,7 +143,8 @@ class PolymarketAdapter(BaseAdapter):
         
         # 性能监控
         self.message_count_by_type = {sub_type: 0 for sub_type in SubscriptionType}
-    
+
+    '''
     def get_detailed_status(self) -> Dict:
         """获取详细状态信息"""
         base_status = super().get_connection_status()
@@ -170,7 +171,8 @@ class PolymarketAdapter(BaseAdapter):
             **base_status,
             "state_statistics": state_stats,
             "subscription_details": subscription_details
-        }        
+        } 
+    '''           
         
         
     async def connect(self) -> bool:
@@ -279,16 +281,9 @@ class PolymarketAdapter(BaseAdapter):
             return
         
         # 构建订阅消息
-        if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
-            # CLOB 端点使用官方格式
-            subscribe_msg = {
-                "assets_ids": market_ids,  # 使用资产ID列表
-                "type": "market"
-            }
-        else:
-            # 其他端点保持原有格式
-            subscribe_msg = self._build_subscribe_message(market_ids, subscription_type)
-            logger.info(f"📡 订阅 {subscription_type.value}: {market_ids}")
+        subscribe_msg = self._build_subscribe_message(market_ids, subscription_type)
+        logger.info(f"📡 订阅 {subscription_type.value}: {market_ids}，msg: {subscribe_msg}")
+
         try:
             await connector.send_json(subscribe_msg)
             logger.info(f"📡 订阅 {subscription_type.value}: {market_ids}，msg: {subscribe_msg}")
@@ -305,32 +300,63 @@ class PolymarketAdapter(BaseAdapter):
         config = self.endpoint_configs[subscription_type]
         base_message = config.message_format.copy()
         
-        # 根据订阅类型处理市场ID
+        # 根据不同的端点协议，填充不同的字段
         if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
-            # CLOB 订阅需要为每个市场创建单独的订阅项
-            base_message["subscriptions"] = [
-                {
-                    **subscription,
-                    "filters": subscription["filters"].format(market_id=market_id)
-                }
-                for market_id in market_ids
-                for subscription in base_message["subscriptions"]
-            ]
+            # CLOB 端点：填充 assets_ids
+            base_message["assets_ids"] = market_ids
+        elif subscription_type in [SubscriptionType.PRICES, SubscriptionType.COMMENTS]:
+            # RTDS 端点：构建 subscriptions
+            if "subscriptions" in base_message:
+                # 为每个市场ID创建订阅项
+                expanded_subscriptions = []
+                for market_id in market_ids:
+                    for subscription_template in base_message["subscriptions"]:
+                        # 如果 filters 中有占位符，替换它
+                        subscription = subscription_template.copy()
+                        if "filters" in subscription and "{market_id}" in subscription["filters"]:
+                            subscription["filters"] = subscription["filters"].format(market_id=market_id)
+                        expanded_subscriptions.append(subscription)
+                base_message["subscriptions"] = expanded_subscriptions
         
         return base_message
 
     def _build_unsubscribe_message(self, market_ids: List[str], subscription_type: SubscriptionType) -> Dict:
-        """构建订阅消息"""
+        """构建取消订阅消息"""
         
-        # 根据订阅类型处理市场ID
+        # 从配置中获取该订阅类型的消息模板
+        config = self.endpoint_configs[subscription_type]
+        
         if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
+            # CLOB 端点：使用正确的取消订阅格式
             unsubscribe_msg = {
-                "type": "unsubscribe",  # 关键：这里与订阅不同
-                "markets": market_ids   # 假设参数名与订阅时相同
+                "assets_ids": market_ids,  # 应该和订阅时使用相同的字段名
+                "type": "unsubscribe"      # 类型改为 unsubscribe
             }
+        elif subscription_type in [SubscriptionType.PRICES, SubscriptionType.COMMENTS]:
+            # RTDS 端点：基于模板构建，将 action 改为 unsubscribe
+            base_message = config.message_format.copy()
+            base_message["action"] = "unsubscribe"  # 修改 action
+            
+            # 为每个市场ID构建订阅项（与订阅时相同）
+            if "subscriptions" in base_message:
+                expanded_subscriptions = []
+                for market_id in market_ids:
+                    for subscription_template in base_message["subscriptions"]:
+                        subscription = subscription_template.copy()
+                        if "filters" in subscription and "{market_id}" in subscription["filters"]:
+                            subscription["filters"] = subscription["filters"].format(market_id=market_id)
+                        expanded_subscriptions.append(subscription)
+                base_message["subscriptions"] = expanded_subscriptions
+            
+            unsubscribe_msg = base_message
+        else:
+            # 未知类型，返回空字典或抛出异常
+            unsubscribe_msg = {}
+            logger.warning(f"⚠️ 未知的订阅类型 {subscription_type}，无法构建取消订阅消息")
         
-        return unsubscribe_msg        
+        return unsubscribe_msg
 
+    '''
     def _initialize_subscription_state(self, market_ids: List[str], subscription_type: SubscriptionType):
         """根据订阅类型初始化状态"""
         if subscription_type == SubscriptionType.ORDERBOOK:
@@ -369,7 +395,8 @@ class PolymarketAdapter(BaseAdapter):
                 self.comment_streams = {}
             
             logger.debug("💬 初始化评论订阅状态")
-
+    '''
+            
     def _cleanup_subscription_state(self, market_ids: List[str], subscription_type: SubscriptionType):
         """清理订阅状态"""
         if subscription_type == SubscriptionType.ORDERBOOK:
@@ -503,7 +530,7 @@ class PolymarketAdapter(BaseAdapter):
     def _update_orderbook(self, market_id: str, bids: List, asks: List, sequence_num: int):
         """更新订单簿状态"""
         try:
-            # 转换 bids - 修复这里
+            # 转换 bids
             bid_levels = []
             for bid in bids:
                 bid_levels.append(OrderBookLevel(
@@ -511,7 +538,7 @@ class PolymarketAdapter(BaseAdapter):
                     quantity=Decimal(str(bid['size']))
                 ))
             
-            # 转换 asks - 修复这里
+            # 转换 asks
             ask_levels = []
             for ask in asks:
                 ask_levels.append(OrderBookLevel(
@@ -544,37 +571,67 @@ class PolymarketAdapter(BaseAdapter):
             logger.error(f"Asks: {asks}")
             
     def _handle_trade_update(self, data: Dict):
-        """处理交易更新"""
+        """处理交易更新 - 直接修改现有订单簿"""
         try:
             market_id = data['market']
             price = Decimal(data['price'])
             quantity = Decimal(data['size'])
-            side = data['side']  # 'buy' or 'sell'
+            side = data['side']
             timestamp = datetime.fromtimestamp(int(data['timestamp']) / 1000, tz=timezone.utc)
             
             # 创建 Trade 对象
             trade = Trade(
-                trade_id=f"{market_id}_{timestamp.timestamp()}",  # 生成一个简单的交易ID
+                trade_id=f"{market_id}_{timestamp.timestamp()}",
                 price=price,
                 quantity=quantity,
                 timestamp=timestamp,
-                is_buyer_maker=(side == 'sell')  # 如果是买单，则卖方是maker；如果是卖单，则买方是maker
+                is_buyer_maker=(side == 'sell')
             )
             
-            # 创建 MarketData 对象，使用 last_trade 字段
-            market_data = MarketData(
-                symbol=market_id,
-                exchange=ExchangeType.POLYMARKET,
-                market_type=MarketType.PREDICTION,
-                timestamp=timestamp,
+            # 🚨 直接修改现有订单簿
+            if market_id in self.orderbook_snapshots:
+                orderbook = self.orderbook_snapshots[market_id]
+                updated = False
+                
+                if side == 'buy':
+                    # 查找并减少卖单数量
+                    for ask in orderbook.asks:
+                        if ask.price == price:
+                            ask.quantity -= quantity
+                            if ask.quantity <= 0:
+                                orderbook.asks.remove(ask)
+                            updated = True
+                            break
+                else:  # 'sell'
+                    # 查找并减少买单数量
+                    for bid in orderbook.bids:
+                        if bid.price == price:
+                            bid.quantity -= quantity
+                            if bid.quantity <= 0:
+                                orderbook.bids.remove(bid)
+                            updated = True
+                            break
+                
+                if updated:
+                    orderbook.timestamp = datetime.now(timezone.utc)
+                    # 重新排序（如果必要）
+                    orderbook.bids.sort(key=lambda x: x.price, reverse=True)
+                    orderbook.asks.sort(key=lambda x: x.price)
+            
+            # ✅ 统一使用 _create_market_data
+            market_data = self._create_market_data(
+                market_id=market_id,
                 last_price=price,
-                last_trade=trade
+                last_trade=trade,
+                external_timestamp=timestamp
             )
             
-            self._notify_callbacks(market_data)
-            
-            logger.info(f"💹 Trade update for {market_id}: {side} {quantity} @ {price}")
-            
+            if market_data:
+                self._notify_callbacks(market_data)
+                logger.info(f"💹 Trade update for {market_id}: {side} {quantity} @ {price}")
+            else:
+                logger.warning(f"⚠️ Could not create market data for trade: {market_id}")
+                
         except Exception as e:
             logger.error(f"❌ Error processing trade update: {e}")
 
@@ -582,7 +639,6 @@ class PolymarketAdapter(BaseAdapter):
         """处理价格变动更新"""
         try:
             market_id = data.get('market')
-            print("_handle_price_change_update1: market_id:", market_id)
             price_changes = data.get('price_changes', [])
             timestamp_raw = data.get('timestamp')
             
@@ -622,7 +678,6 @@ class PolymarketAdapter(BaseAdapter):
                     last_price=price,
                     external_timestamp=timestamp
                 )
-                print("market_data:", market_data)
                 if market_data:
                     logger.info(f"价格变动回调: {market_data}")
                     self._notify_callbacks(market_data)

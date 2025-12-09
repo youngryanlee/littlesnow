@@ -237,26 +237,64 @@ class TestPolymarketWebSocketAdapter:
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
         subscription_type = SubscriptionType.ORDERBOOK
         adapter.is_connected = True
-        adapter.subscribed_symbols.add(market_id)
+        
+        # 不再使用 subscribed_symbols，只使用 subscription_status
         adapter.subscription_status[subscription_type].add(market_id)
         adapter.orderbook_snapshots[market_id] = Mock()
         adapter.last_sequence_nums[market_id] = 1000
-        
+
         # 设置connector的send_json方法
         target_connector = adapter.connectors[subscription_type] # 获取将被调用的connector
         target_connector.send_json = AsyncMock() # 只Mock这一个
-        target_connector.is_connected = True 
-        
+        target_connector.is_connected = True
+
         await adapter.unsubscribe([market_id], subscription_type)
-        
-        # 检查取消订阅状态
-        assert market_id not in adapter.subscribed_symbols
-        
+
+        # 检查取消订阅状态 - 从 subscription_status 中移除
+        assert market_id not in adapter.subscription_status[subscription_type]
+
         # 检查是否向所有connector发送了取消订阅消息
         target_connector.send_json.assert_called_once()
         call_args = target_connector.send_json.call_args[0][0]
         assert call_args["type"] == "unsubscribe"
-        assert market_id in call_args.get("markets", []) or market_id == call_args.get("market")
+        # 修正断言：检查 assets_ids 而不是 markets
+        assert market_id in call_args.get("assets_ids", [])
+
+    @pytest.mark.asyncio
+    async def test_unsubscribe_different_types(self, adapter):
+        """测试不同类型连接的取消订阅"""
+        market_id = "0x1234567890abcdef1234567890abcdef12345678"
+        
+        # 测试所有订阅类型
+        test_cases = [
+            (SubscriptionType.ORDERBOOK, {"assets_ids": [market_id], "type": "unsubscribe"}),
+            (SubscriptionType.TRADES, {"assets_ids": [market_id], "type": "unsubscribe"}),
+            (SubscriptionType.PRICES, {"action": "unsubscribe", "subscriptions": [...]}),
+            (SubscriptionType.COMMENTS, {"action": "unsubscribe", "subscriptions": [...]}),
+        ]
+        
+        for subscription_type, expected_msg in test_cases:
+            adapter.subscription_status[subscription_type].add(market_id)
+            target_connector = adapter.connectors[subscription_type]
+            target_connector.send_json = AsyncMock()
+            target_connector.is_connected = True
+            
+            await adapter.unsubscribe([market_id], subscription_type)
+            
+            # 验证从 subscription_status 中移除
+            assert market_id not in adapter.subscription_status[subscription_type]
+            
+            # 验证发送了取消订阅消息
+            target_connector.send_json.assert_called_once()
+            
+            # 验证消息类型正确
+            call_args = target_connector.send_json.call_args[0][0]
+            
+            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
+                assert call_args["type"] == "unsubscribe"
+                assert market_id in call_args.get("assets_ids", [])
+            else:
+                assert call_args["action"] == "unsubscribe"    
     
     def test_handle_orderbook_update(self, adapter, sample_orderbook_message):
         """测试处理订单簿更新"""
