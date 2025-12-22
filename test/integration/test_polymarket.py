@@ -3,6 +3,7 @@ import asyncio
 import logging
 import sys
 import os
+import time
 from decimal import Decimal
 from typing import List, Dict, Any
 
@@ -28,7 +29,7 @@ class PolymarketTestBase:
         """获取活跃市场列表"""
         logger.info(f"获取前 {limit} 个活跃市场...")
         try:
-            markets = await adapter.get_market_list(limit)
+            markets = await adapter.get_active_market(limit)
             
             if not markets:
                 logger.warning("无法获取活跃市场列表，使用测试市场ID")
@@ -333,7 +334,7 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
             await ws_manager.stop()
     
     async def test_polymarket_price_change_data(self):
-        """测试 Polymarket 价格变动数据 - 新增测试"""
+        """测试 Polymarket 价格变动数据 - 修正版"""
         logger.info("开始 Polymarket 价格变动数据测试...")
         
         polymarket = PolymarketAdapter()
@@ -344,25 +345,15 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         price_change_data = []
         
         def on_price_change_data(data: MarketData):
-            # 只收集价格变动数据
-            if (hasattr(data, 'message_type') and data.message_type == 'price_change') or \
-               (hasattr(data, 'price_change') and data.price_change):
+            # 🎯 修正：不再检查不存在的属性，而是检查是否有 last_price
+            # 价格变动数据应该包含 last_price
+            if data.last_price is not None:
                 price_change_data.append(data)
-                logger.info(f"📈 价格变动数据: {data.symbol}")
+                logger.info(f"📈 收到价格变动数据: {data.symbol} - 价格: {data.last_price}")
                 
-                # 记录详细信息
-                info_parts = []
-                if hasattr(data, 'price') and data.price:
-                    info_parts.append(f"价格: {data.price}")
-                if hasattr(data, 'best_bid') and data.best_bid:
-                    info_parts.append(f"最优买价: {data.best_bid}")
-                if hasattr(data, 'best_ask') and data.best_ask:
-                    info_parts.append(f"最优卖价: {data.best_ask}")
-                if hasattr(data, 'side') and data.side:
-                    info_parts.append(f"方向: {data.side}")
-                
-                if info_parts:
-                    logger.info(f"   详细信息: {' | '.join(info_parts)}")
+                # 检查是否有元数据包含 side 信息（如果有的话）
+                if hasattr(data, 'metadata') and data.metadata:
+                    logger.info(f"   元数据: {data.metadata}")
         
         market_router.add_callback(on_price_change_data)
         
@@ -371,36 +362,66 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         
         try:
             await ws_manager.start()
-            await asyncio.sleep(3)
+            await asyncio.sleep(5)  # 增加等待时间，确保连接稳定
             
             # 检查连接状态
             status = ws_manager.get_connection_status()
+            logger.info(f"连接状态: {status}")
+            
             if not status.get('polymarket', False):
                 logger.warning("❌ Polymarket 连接失败，跳过测试")
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取活跃市场并订阅
             market_ids = await self.get_active_markets(polymarket, 2)
+            logger.info(f"获取到的市场ID: {market_ids}")
+            
+            # 🎯 关键：确保订阅了 PRICE 类型，而不仅仅是 ORDERBOOK
+            # 价格变动数据通常是通过 PRICE 订阅类型获取的
             await ws_manager.subscribe_all(market_ids)
             
-            # 收集25秒的价格变动数据（这种消息可能不那么频繁）
-            logger.info("收集25秒价格变动数据...")
-            await asyncio.sleep(25)
+            # 给订阅一些时间
+            await asyncio.sleep(3)
+            
+            # 收集更长时间的数据（价格变动可能不频繁）
+            logger.info("收集40秒价格变动数据（价格变动消息可能不频繁）...")
+            
+            start_time = time.time()
+            while time.time() - start_time < 40:
+                await asyncio.sleep(1)
+                logger.info(f"等待中... 已等待 {int(time.time() - start_time)} 秒，收到 {len(price_change_data)} 条数据")
+                
+                # 如果已经收到一些数据，可以提前结束
+                if len(price_change_data) >= 2:
+                    break
             
             # 验证是否收到数据
-            # 注意：价格变动消息可能不频繁，如果没收到也正常
             if len(price_change_data) == 0:
-                logger.warning("⚠️ 未收到价格变动数据，这可能是正常的（消息不频繁）")
-                # 不强制断言失败，只记录警告
+                logger.warning("⚠️ 未收到价格变动数据，可能的原因：")
+                logger.warning("   1. 市场不活跃，没有价格变动")
+                logger.warning("   2. 订阅的频道不正确")
+                logger.warning("   3. 网络延迟或连接问题")
+                
+                # 检查适配器内部状态
+                logger.info("检查适配器状态...")
+                status = polymarket.get_connection_status()
+                logger.info(f"适配器状态: {status}")
+                
                 pytest.skip("未收到价格变动数据，跳过断言")
             else:
                 # 验证数据格式
-                for data in price_change_data[:5]:
+                logger.info(f"✅ 收到 {len(price_change_data)} 条价格变动数据")
+                
+                for i, data in enumerate(price_change_data[:5]):
+                    logger.info(f"数据 {i+1}: {data.symbol} - 价格: {data.last_price} - 时间: {data.timestamp}")
                     assert isinstance(data, MarketData)
                     assert data.exchange == ExchangeType.POLYMARKET
                     assert data.timestamp is not None
-                    # 价格变动消息应该有一些特定字段
-                    assert hasattr(data, 'price') or hasattr(data, 'best_bid') or hasattr(data, 'price_change')
+                    assert data.last_price is not None  # 价格变动数据必须有价格
+                    
+                    # 打印更多信息用于调试
+                    if hasattr(data, 'orderbook') and data.orderbook:
+                        logger.info(f"   订单簿深度: {len(data.orderbook.bids)} bids, {len(data.orderbook.asks)} asks")
                 
                 logger.info(f"✅ 价格变动数据测试通过! 收到 {len(price_change_data)} 条价格变动数据")
             

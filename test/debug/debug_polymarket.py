@@ -241,9 +241,9 @@ async def analyze_adapter_behavior():
     print(f"   - 已订阅状态: {adapter.subscription_status}")
     
     print("\n2. 检查连接器配置:")
-    for sub_type, config in adapter.endpoint_configs.items():
-        print(f"   - {sub_type.value}: {config.endpoint}")
-        print(f"     消息格式: {config.message_format}")
+    for sub_type, config in adapter._subscription_config.items():
+        print(f"   - {sub_type.value}: {config.get('endpoint')}")
+        print(f"     消息格式: {config.get('message_format')}")
     
     print("\n3. 测试连接和订阅流程:")
     try:
@@ -365,16 +365,16 @@ async def main():
     """主调试函数"""
     print("🚀 Polymarket 真实适配器调试")
 
-    await debug_gamma_api()
+    #await debug_gamma_api()
    
     # 1. 分析适配器行为
     await analyze_adapter_behavior()
     
     # 2. 测试多连接器独立操作
-    await test_multiple_connectors()
+    #await test_multiple_connectors()
 
     # 3. 测试真实的订阅功能
-    await debug_polymarket_subscription()
+    #await debug_polymarket_subscription()
  
     print("\n=== 调试完成 ===")
     print("总结:")

@@ -1,8 +1,9 @@
-from dataclasses import dataclass
-from typing import List, Optional, Dict
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional, Dict, Any
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
+import json
 
 class MarketType(Enum):
     SPOT = "spot"
@@ -31,7 +32,8 @@ class OrderBookLevel:
 class OrderBook:
     bids: List[OrderBookLevel]
     asks: List[OrderBookLevel]
-    timestamp: datetime
+    server_timestamp: int
+    receive_timestamp: int
     symbol: str
     
     def get_spread(self) -> Decimal:
@@ -51,6 +53,223 @@ class Trade:
     quantity: Decimal
     timestamp: datetime
     is_buyer_maker: bool
+
+class MarketStatus(Enum):
+    """市场状态枚举"""
+    ACTIVE = "active"
+    CLOSED = "closed"
+    ARCHIVED = "archived"
+    PENDING = "pending"
+
+@dataclass(slots=True)
+class MarketMeta:
+    """市场元数据（核心信息）"""
+    
+    # 基本识别信息
+    id: str
+    question: str
+    slug: str
+    condition_id: str
+    
+    # 状态信息
+    active: bool = False
+    closed: bool = False
+    featured: bool = False
+    accepting_orders: bool = False
+    
+    # 交易配置
+    enable_order_book: bool = False
+    order_price_min_tick_size: float = 0.001  # 最小价格变动单位
+    order_min_size: float = 5.0               # 最小订单规模（美元）
+    spread: float = 0.001                     # 买卖价差
+    clobTokenIds: List[str] = field(default_factory=list)
+    
+    # 时间信息
+    end_date: Optional[str] = None
+    start_date: Optional[str] = None
+    
+    # 当前价格信息
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    last_trade_price: Optional[float] = None
+    
+    # 结果和概率
+    outcomes: List[str] = field(default_factory=list)
+    outcome_prices: List[float] = field(default_factory=list)
+    
+    # 市场指标
+    volume_24hr: Optional[float] = None
+    liquidity: Optional[float] = None
+    competitive: Optional[float] = None
+    
+    # 缓存元数据
+    cached_at: Optional[str] = None
+    original_data_size: int = 0
+    
+    # 🎯 计算属性（不存储在__slots__中）
+    @property
+    def status(self) -> MarketStatus:
+        """获取市场状态"""
+        if self.closed:
+            return MarketStatus.CLOSED
+        elif self.active:
+            return MarketStatus.ACTIVE
+        else:
+            return MarketStatus.PENDING
+    
+    @property
+    def yes_price(self) -> Optional[float]:
+        """获取Yes代币价格（二元市场的第一个结果）"""
+        if self.outcome_prices and len(self.outcome_prices) >= 1:
+            return self.outcome_prices[0]
+        return None
+    
+    @property
+    def no_price(self) -> Optional[float]:
+        """获取No代币价格（二元市场的第二个结果）"""
+        if self.outcome_prices and len(self.outcome_prices) >= 2:
+            return self.outcome_prices[1]
+        return None
+    
+    @property
+    def is_binary(self) -> bool:
+        """是否为二元市场（Yes/No）"""
+        return len(self.outcomes) == 2 and 'Yes' in self.outcomes and 'No' in self.outcomes
+    
+    @property
+    def is_tradable(self) -> bool:
+        """市场是否可交易"""
+        return (
+            self.active 
+            and self.accepting_orders 
+            and self.enable_order_book
+            and not self.closed
+        )
+    
+    @property
+    def days_to_expiry(self) -> Optional[int]:
+        """距离到期还有多少天"""
+        if not self.end_date:
+            return None
+        
+        try:
+            expiry_date = datetime.fromisoformat(self.end_date.replace('Z', '+00:00'))
+            current_date = datetime.utcnow()
+            delta = expiry_date - current_date
+            return max(0, delta.days)
+        except (ValueError, AttributeError):
+            return None
+    
+    def validate_order(self, price: float, size: float) -> List[str]:
+        """验证订单参数，返回错误列表"""
+        errors = []
+        
+        if not self.is_tradable:
+            errors.append(f"市场 {self.id} 不可交易")
+        
+        if size < self.order_min_size:
+            errors.append(f"订单规模 {size} 小于最小要求 {self.order_min_size}")
+        
+        if price <= 0:
+            errors.append(f"价格 {price} 必须为正数")
+        
+        # 检查价格是否符合最小变动单位
+        if price % self.order_price_min_tick_size != 0:
+            errors.append(f"价格 {price} 不符合最小变动单位 {self.order_price_min_tick_size}")
+        
+        # 对于二元市场，价格应在0-1之间
+        if self.is_binary and (price < 0 or price > 1):
+            errors.append(f"二元市场价格必须在0-1之间，当前价格: {price}")
+        
+        return errors
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典（用于JSON序列化）"""
+        return asdict(self)
+    
+    @classmethod
+    def from_api_data(cls, market_data: Dict[str, Any]) -> 'MarketMeta':
+        """从API原始数据创建MarketMeta实例"""
+        return cls(
+            # 基本识别信息
+            id=market_data.get('id', ''),
+            question=market_data.get('question', ''),
+            slug=market_data.get('slug', ''),
+            condition_id=market_data.get('conditionId', ''),
+            
+            # 状态信息
+            active=bool(market_data.get('active', False)),
+            closed=bool(market_data.get('closed', False)),
+            featured=bool(market_data.get('featured', False)),
+            accepting_orders=bool(market_data.get('acceptingOrders', False)),
+            
+            # 交易配置
+            enable_order_book=bool(market_data.get('enableOrderBook', False)),
+            order_price_min_tick_size=float(market_data.get('orderPriceMinTickSize', 0.001)),
+            order_min_size=float(market_data.get('orderMinSize', 5.0)),
+            spread=float(market_data.get('spread', 0.001)),
+            clobTokenIds=cls._parse_json_field(market_data.get('clobTokenIds')),
+            
+            # 时间信息
+            end_date=market_data.get('endDate'),
+            start_date=market_data.get('startDate'),
+            
+            # 当前价格信息
+            best_bid=cls._safe_float(market_data.get('bestBid')),
+            best_ask=cls._safe_float(market_data.get('bestAsk')),
+            last_trade_price=cls._safe_float(market_data.get('lastTradePrice')),
+            
+            # 结果和概率
+            outcomes=cls._parse_json_field(market_data.get('outcomes')),
+            outcome_prices=cls._parse_float_list(market_data.get('outcomePrices')),
+            
+            # 市场指标
+            volume_24hr=cls._safe_float(market_data.get('volume24hr')),
+            liquidity=cls._safe_float(market_data.get('liquidity')),
+            competitive=cls._safe_float(market_data.get('competitive')),
+            
+            # 缓存元数据
+            cached_at=datetime.now(timezone.utc).isoformat(),
+            original_data_size=len(str(market_data))
+        )
+    
+    @staticmethod
+    def _parse_json_field(field_value) -> List[str]:
+        """安全解析JSON字段"""
+        if isinstance(field_value, str):
+            try:
+                return json.loads(field_value)
+            except (json.JSONDecodeError, TypeError):
+                return []
+        elif isinstance(field_value, list):
+            return field_value
+        return []
+    
+    @staticmethod
+    def _parse_float_list(field_value) -> List[float]:
+        """解析浮点数列表"""
+        if isinstance(field_value, str):
+            try:
+                str_list = json.loads(field_value)
+                return [float(x) for x in str_list]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return []
+        elif isinstance(field_value, list):
+            try:
+                return [float(x) for x in field_value]
+            except (ValueError, TypeError):
+                return []
+        return []
+    
+    @staticmethod
+    def _safe_float(value) -> Optional[float]:
+        """安全转换为浮点数"""
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return None    
 
 @dataclass(frozen=True)
 class MarketData:

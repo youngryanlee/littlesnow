@@ -28,17 +28,17 @@ class TestPolymarketWebSocketAdapter:
             # 创建4个mock connector，对应orderbook、trades、prices、comments
             mock_connectors = {
                 SubscriptionType.ORDERBOOK: MagicMock(),
-                SubscriptionType.TRADES: MagicMock(),
-                SubscriptionType.PRICES: MagicMock(),
-                SubscriptionType.COMMENTS: MagicMock()
+                SubscriptionType.TRADE: MagicMock(),
+                SubscriptionType.PRICE: MagicMock(),
+                SubscriptionType.COMMENT: MagicMock()
             }
             
             # 🔧 关键修复：创建字符串到枚举的映射
             type_map = {
                 'orderbook': SubscriptionType.ORDERBOOK,
-                'trades': SubscriptionType.TRADES,
-                'prices': SubscriptionType.PRICES,
-                'comments': SubscriptionType.COMMENTS
+                'trades': SubscriptionType.TRADE,
+                'prices': SubscriptionType.PRICE,
+                'comments': SubscriptionType.COMMENT
             }
             
             # 让WebSocketConnector构造函数返回正确的mock对象
@@ -68,6 +68,7 @@ class TestPolymarketWebSocketAdapter:
     def sample_orderbook_message(self):
         """提供样本订单簿消息"""
         return {
+            "asset_id": "1234567890abcdef1234567890abcdef12345678",
             "market": "0x1234567890abcdef1234567890abcdef12345678",
             "timestamp": "1640995200000",  # 使用时间戳而不是序列号
             "bids": [{"price": "0.65", "size": "1000"}, {"price": "0.64", "size": "500"}],
@@ -79,6 +80,7 @@ class TestPolymarketWebSocketAdapter:
     def sample_trade_message(self):
         """提供样本交易消息"""
         return {
+            "asset_id": "1234567890abcdef1234567890abcdef12345678",
             "market": "0x1234567890abcdef1234567890abcdef12345678",
             "price": "0.65",
             "size": "100",
@@ -98,7 +100,16 @@ class TestPolymarketWebSocketAdapter:
                     "price": "0.022",
                     "size": "4230.32",
                     "side": "SELL",
-                    "hash": "test_hash",
+                    "hash": "test_hash1",
+                    "best_bid": "0.002",
+                    "best_ask": "0.003"
+                },
+                {
+                    "asset_id": "test_asset_2",
+                    "price": "0.078",
+                    "size": "230.32",
+                    "side": "BUY",
+                    "hash": "test_hash2",
                     "best_bid": "0.002",
                     "best_ask": "0.003"
                 }
@@ -117,9 +128,9 @@ class TestPolymarketWebSocketAdapter:
         
         # 🔧 修改：检查多个connector - 使用枚举而不是字符串
         assert SubscriptionType.ORDERBOOK in adapter.connectors
-        assert SubscriptionType.TRADES in adapter.connectors
-        assert SubscriptionType.PRICES in adapter.connectors
-        assert SubscriptionType.COMMENTS in adapter.connectors
+        assert SubscriptionType.TRADE in adapter.connectors
+        assert SubscriptionType.PRICE in adapter.connectors
+        assert SubscriptionType.COMMENT in adapter.connectors
         
         # WebSocket 版本特有的属性
         assert adapter.message_count == 0
@@ -154,7 +165,7 @@ class TestPolymarketWebSocketAdapter:
         
         # 设置前两个connector成功，后两个失败
         for i, (connector_type, connector) in enumerate(connectors):
-            if i < 2:  # orderbook和trades成功
+            if i < 2:  # orderbook和trade成功
                 connector.connect = AsyncMock(return_value=True)
             else:  # prices和comments失败
                 connector.connect = AsyncMock(return_value=False)
@@ -192,27 +203,81 @@ class TestPolymarketWebSocketAdapter:
     
     @pytest.mark.asyncio
     async def test_subscribe_valid_market(self, adapter):
-        """测试订阅有效的市场 - 多connector版本"""
+        """测试订阅有效的市场 - 适配新的基于asset_id的订阅逻辑"""
+        # 1. 准备测试数据
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
+        
+        # 创建模拟的asset_ids（代币ID） - 一个市场通常有2个代币（Yes/No）
+        mock_asset_ids = [
+            "asset_id_yes_1234567890abcdef",
+            "asset_id_no_1234567890abcdef"
+        ]
+        
+        # 2. Mock缓存方法，让market_id能返回对应的asset_ids
+        adapter.get_market_tokens = MagicMock(return_value=mock_asset_ids)
+        
+        # 3. 设置连接状态和Mock
         adapter.is_connected = True
+        subscription_type = SubscriptionType.ORDERBOOK  # 注意：可能需要调整类型名
         
-        subscription_type = SubscriptionType.ORDERBOOK
-        # 设置connector的send_json方法
-        target_connector = adapter.connectors[subscription_type] # 获取将被调用的connector
-        target_connector.send_json = AsyncMock() # 只Mock这一个
-        target_connector.is_connected = True # 确保连接状态为True
+        # 获取对应的connector并mock send_json方法
+        target_connector = adapter.connectors[subscription_type]
+        target_connector.send_json = AsyncMock()
+        target_connector.is_connected = True
         
+        # 4. 执行订阅
         await adapter.subscribe([market_id], subscription_type)
         
-        # 检查订阅状态
-        assert market_id in adapter.subscribed_symbols
-        assert market_id in adapter.subscription_status[subscription_type]
+        # 5. 验证结果
         
-        # 检查是否向connector发送了订阅消息
+        # 5.1 验证get_market_tokens被正确调用
+        adapter.get_market_tokens.assert_called_once_with(market_id)
+        
+        # 5.2 验证subscription_status中包含了正确的asset_ids
+        # 注意：现在subscription_status存储的是asset_ids，不是market_ids
+        for asset_id in mock_asset_ids:
+            assert asset_id in adapter.subscription_status[subscription_type]
+        
+        # 5.3 验证send_json被调用，且消息格式正确
         target_connector.send_json.assert_called_once()
         call_args = target_connector.send_json.call_args[0][0]
+        
+        # 验证消息类型
         assert call_args["type"] == "market"
-        assert market_id in call_args.get("assets_ids", [])
+        
+        # 验证消息中包含我们的asset_ids
+        sent_asset_ids = call_args.get("assets_ids", [])
+        for asset_id in mock_asset_ids:
+            assert asset_id in sent_asset_ids
+        
+        # 5.4 验证subscribed_markets
+        assert market_id in adapter.subscribed_markets[subscription_type]
+
+    @pytest.mark.asyncio
+    async def test_subscribe_market_without_tokens(self, adapter):
+        """测试订阅没有代币ID的市场"""
+        market_id = "invalid_market_id"
+        adapter.is_connected = True
+        
+        # Mock get_market_tokens返回空列表
+        adapter.get_market_tokens = MagicMock(return_value=[])
+        
+        subscription_type = SubscriptionType.ORDERBOOK
+        target_connector = adapter.connectors[subscription_type]
+        target_connector.send_json = AsyncMock()
+        
+        # 执行订阅 - 应该不会发送消息
+        await adapter.subscribe([market_id], subscription_type)
+        
+        # 验证：get_market_tokens被调用
+        adapter.get_market_tokens.assert_called_once_with(market_id)
+        
+        # 验证：send_json没有被调用（因为没有代币ID）
+        target_connector.send_json.assert_not_called()
+        
+        # 验证：subscription_status仍然是空的
+        assert len(adapter.subscription_status[subscription_type]) == 0    
+
     
     @pytest.mark.asyncio
     async def test_subscribe_when_disconnected(self, adapter):
@@ -233,72 +298,158 @@ class TestPolymarketWebSocketAdapter:
     
     @pytest.mark.asyncio
     async def test_unsubscribe(self, adapter):
-        """测试取消订阅 - 多connector版本"""
+        """测试取消订阅 - 适配新的基于asset_id的订阅逻辑"""
+        # 1. 准备测试数据
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
+        
+        # 创建模拟的asset_ids（代币ID）
+        mock_asset_ids = [
+            "asset_id_yes_1234567890abcdef",
+            "asset_id_no_1234567890abcdef"
+        ]
+        
         subscription_type = SubscriptionType.ORDERBOOK
         adapter.is_connected = True
         
-        # 不再使用 subscribed_symbols，只使用 subscription_status
-        adapter.subscription_status[subscription_type].add(market_id)
-        adapter.orderbook_snapshots[market_id] = Mock()
-        adapter.last_sequence_nums[market_id] = 1000
-
-        # 设置connector的send_json方法
-        target_connector = adapter.connectors[subscription_type] # 获取将被调用的connector
-        target_connector.send_json = AsyncMock() # 只Mock这一个
+        # 2. Mock缓存方法，让market_id能返回对应的asset_ids
+        adapter.get_market_tokens = MagicMock(return_value=mock_asset_ids)
+        
+        # 3. 设置初始状态 - 注意：现在subscription_status存储的是asset_id，不是market_id
+        # 将asset_ids添加到subscription_status中（模拟已订阅状态）
+        adapter.subscription_status[subscription_type].update(mock_asset_ids)
+        
+        # 将market_id添加到subscribed_markets中
+        adapter.subscribed_markets[subscription_type].add(market_id)
+        
+        # 4. 设置Mock
+        target_connector = adapter.connectors[subscription_type]
+        target_connector.send_json = AsyncMock()
         target_connector.is_connected = True
-
+        
+        # 5. 执行取消订阅
         await adapter.unsubscribe([market_id], subscription_type)
-
-        # 检查取消订阅状态 - 从 subscription_status 中移除
-        assert market_id not in adapter.subscription_status[subscription_type]
-
-        # 检查是否向所有connector发送了取消订阅消息
+        
+        # 6. 验证结果
+        
+        # 6.1 验证get_market_tokens被正确调用
+        adapter.get_market_tokens.assert_called_once_with(market_id)
+        
+        # 6.2 验证subscription_status中的asset_ids已被移除
+        for asset_id in mock_asset_ids:
+            assert asset_id not in adapter.subscription_status[subscription_type]
+        
+        # 6.3 验证subscribed_markets中的market_id已被移除
+        assert market_id not in adapter.subscribed_markets[subscription_type]
+        
+        # 6.4 验证send_json被调用，且消息格式正确
         target_connector.send_json.assert_called_once()
         call_args = target_connector.send_json.call_args[0][0]
-        assert call_args["type"] == "unsubscribe"
-        # 修正断言：检查 assets_ids 而不是 markets
-        assert market_id in call_args.get("assets_ids", [])
+        
+        # 验证消息类型
+        assert call_args["type"] == "unsubscribe"  # 或根据实际协议调整
+        
+        # 验证消息中包含我们的asset_ids（注意：实际取消订阅消息可能格式不同）
+        # 根据你的实际取消订阅消息格式调整以下断言
+        sent_asset_ids = call_args.get("assets_ids", [])
+        for asset_id in mock_asset_ids:
+            assert asset_id in sent_asset_ids
+        
+        # 6.5 验证日志中没有错误
+        # 可以通过检查日志输出或确保没有抛出异常来验证
 
     @pytest.mark.asyncio
     async def test_unsubscribe_different_types(self, adapter):
-        """测试不同类型连接的取消订阅"""
+        """测试不同类型连接的取消订阅 - 适配新的基于asset_id的逻辑"""
+        # 1. 准备测试数据
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
         
-        # 测试所有订阅类型
+        # 模拟不同订阅类型对应的asset_ids
+        mock_asset_mapping = {
+            SubscriptionType.ORDERBOOK: ["asset_orderbook_yes", "asset_orderbook_no"],
+            SubscriptionType.TRADE: ["asset_trade_yes", "asset_trade_no"],
+            SubscriptionType.PRICE: [],  # PRICE类型可能不基于asset_ids
+            SubscriptionType.COMMENT: [], # COMMENT类型可能不基于asset_ids
+        }
+        
+        # 2. 测试所有订阅类型
         test_cases = [
-            (SubscriptionType.ORDERBOOK, {"assets_ids": [market_id], "type": "unsubscribe"}),
-            (SubscriptionType.TRADES, {"assets_ids": [market_id], "type": "unsubscribe"}),
-            (SubscriptionType.PRICES, {"action": "unsubscribe", "subscriptions": [...]}),
-            (SubscriptionType.COMMENTS, {"action": "unsubscribe", "subscriptions": [...]}),
+            (SubscriptionType.ORDERBOOK, {"assets_ids": mock_asset_mapping[SubscriptionType.ORDERBOOK], "type": "unsubscribe"}),
+            (SubscriptionType.TRADE, {"assets_ids": mock_asset_mapping[SubscriptionType.TRADE], "type": "unsubscribe"}),
+            # PRICE和COMMENT类型可能需要不同的消息格式
+            (SubscriptionType.PRICE, {"action": "unsubscribe", "subscriptions": [{"topic": "crypto_prices", "type": "update"}]}),
+            (SubscriptionType.COMMENT, {"action": "unsubscribe", "subscriptions": [{"topic": "comments", "type": "comment_created"}]}),
         ]
         
         for subscription_type, expected_msg in test_cases:
-            adapter.subscription_status[subscription_type].add(market_id)
+            # 重置之前测试的影响
+            adapter.subscription_status[subscription_type].clear()
+            adapter.subscribed_markets[subscription_type].clear()
+                 
+            # 3. 对于基于asset_id的订阅类型，Mock转换方法
+            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADE]:
+                mock_asset_ids = mock_asset_mapping[subscription_type]
+                adapter.get_market_tokens = MagicMock(return_value=mock_asset_ids)
+                
+                # 设置初始状态：添加asset_ids到subscription_status
+                adapter.subscribed_markets[subscription_type].add(market_id)
+                adapter.subscription_status[subscription_type].update(mock_asset_ids)
+            else:
+                # 对于PRICE和COMMENT类型，可能不需要asset_ids转换
+                adapter.get_market_tokens = MagicMock(return_value=[])
+                
+                # 这些类型可能直接订阅，不需要asset_ids
+                # 设置其他状态表示已订阅
+                mock_topics = expected_msg["subscriptions"][0]["topic"]
+                adapter.subscribed_topics[subscription_type].add(mock_topics)
+            
+            # 4. 设置Mock连接器
             target_connector = adapter.connectors[subscription_type]
             target_connector.send_json = AsyncMock()
             target_connector.is_connected = True
             
-            await adapter.unsubscribe([market_id], subscription_type)
+            # 5. 执行取消订阅
+            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADE]:
+                await adapter.unsubscribe([market_id], subscription_type)
+            else:
+                await adapter.unsubscribe_rtds(subscription_type)    
             
-            # 验证从 subscription_status 中移除
-            assert market_id not in adapter.subscription_status[subscription_type]
+            # 6. 验证结果
             
-            # 验证发送了取消订阅消息
+            # 6.1 验证get_market_tokens被调用（对于需要转换的类型）
+            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADE]:
+                adapter.get_market_tokens.assert_called_once_with(market_id)
+                
+                # 验证subscription_status中的asset_ids已被移除
+                for asset_id in mock_asset_ids:
+                    assert asset_id not in adapter.subscription_status[subscription_type]
+            
+            # 6.2 验证subscribed_markets中的market_id已被移除
+            assert market_id not in adapter.subscribed_markets[subscription_type]
+            
+            # 6.3 验证发送了取消订阅消息
             target_connector.send_json.assert_called_once()
-            
-            # 验证消息类型正确
             call_args = target_connector.send_json.call_args[0][0]
             
-            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADES]:
+            # 6.4 验证消息格式正确
+            if subscription_type in [SubscriptionType.ORDERBOOK, SubscriptionType.TRADE]:
+                # CLOB端点格式
                 assert call_args["type"] == "unsubscribe"
-                assert market_id in call_args.get("assets_ids", [])
+                
+                # 验证消息中包含我们的asset_ids
+                sent_asset_ids = call_args.get("assets_ids", [])
+                for asset_id in mock_asset_ids:
+                    assert asset_id in sent_asset_ids
             else:
-                assert call_args["action"] == "unsubscribe"    
+                # RTDS端点格式
+                assert call_args["action"] == "unsubscribe"
+                # 可以根据需要进一步验证subscriptions内容
+            
+            # 7. 清理，准备下一个测试用例
+            target_connector.send_json.reset_mock()
     
     def test_handle_orderbook_update(self, adapter, sample_orderbook_message):
         """测试处理订单簿更新"""
-        market_id = sample_orderbook_message["market"]
+        asset_id = sample_orderbook_message["asset_id"]
         
         # 模拟回调
         callback_mock = Mock()
@@ -308,11 +459,11 @@ class TestPolymarketWebSocketAdapter:
         adapter._handle_orderbook_update(sample_orderbook_message)
         
         # 检查订单簿状态更新
-        assert market_id in adapter.orderbook_snapshots
+        assert asset_id in adapter.orderbook_snapshots
         # 注意：现在使用时间戳作为序列号
-        assert adapter.last_sequence_nums[market_id] == 1640995200000
+        assert adapter.last_sequence_nums[asset_id] == 1640995200000
         
-        orderbook = adapter.orderbook_snapshots[market_id]
+        orderbook = adapter.orderbook_snapshots[asset_id]
         assert len(orderbook.bids) == 2
         assert len(orderbook.asks) == 2
         assert orderbook.bids[0].price == Decimal("0.65")
@@ -328,8 +479,8 @@ class TestPolymarketWebSocketAdapter:
         adapter.add_callback(callback_mock)
 
         # 确保市场在订阅列表中
-        market_id = sample_trade_message["market"]
-        adapter.subscribed_symbols.add(market_id)
+        asset_id = sample_trade_message["asset_id"]
+        adapter.subscribed_markets[SubscriptionType.TRADE].add(asset_id)
 
         # 处理交易消息
         adapter._handle_trade_update(sample_trade_message)
@@ -340,7 +491,7 @@ class TestPolymarketWebSocketAdapter:
         # 检查回调参数
         market_data = callback_mock.call_args[0][0]
         assert isinstance(market_data, MarketData)
-        assert market_data.symbol == sample_trade_message["market"]
+        assert market_data.symbol == sample_trade_message["asset_id"]
         assert market_data.last_price == Decimal("0.65")
         
         # 检查交易数据
@@ -359,7 +510,7 @@ class TestPolymarketWebSocketAdapter:
         adapter._handle_price_change_update(sample_price_change_message)
         
         # 检查回调被调用
-        callback_mock.assert_called_once()
+        assert callback_mock.call_count == 2
         
         # 检查回调参数
         market_data = callback_mock.call_args[0][0]
@@ -367,7 +518,7 @@ class TestPolymarketWebSocketAdapter:
         assert market_data.exchange == ExchangeType.POLYMARKET
         
         # 价格变动消息应该包含特定信息
-        assert market_data.symbol == sample_price_change_message["market"]
+        assert market_data.symbol == sample_price_change_message.get("price_changes")[1]["asset_id"]
     
     def test_handle_raw_message_array(self, adapter, sample_orderbook_message, 
                                                         sample_trade_message, sample_price_change_message):
@@ -433,7 +584,7 @@ class TestPolymarketWebSocketAdapter:
             "event_type": "unknown_type",
             "data": "test"
         }
-        
+    
         # 这个应该记录警告但不抛出异常
         adapter._handle_raw_message(unknown_message)
     
@@ -453,17 +604,26 @@ class TestPolymarketWebSocketAdapter:
         """测试从订单簿创建市场数据"""
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
         
-        # 创建模拟订单簿
+        # 获取当前时间的毫秒时间戳
+        now = datetime.now(timezone.utc)
+        now_timestamp_ms = int(now.timestamp() * 1000)
+        
+        # 创建模拟订单簿，使用正确的时间戳参数
         mock_orderbook = OrderBook(
             bids=[OrderBookLevel(price=Decimal("0.65"), quantity=Decimal("1000"))],
             asks=[OrderBookLevel(price=Decimal("0.66"), quantity=Decimal("800"))],
-            timestamp=datetime.now(timezone.utc),
+            server_timestamp=now_timestamp_ms,  # 服务器时间戳
+            receive_timestamp=now_timestamp_ms,  # 接收时间戳
             symbol=market_id
         )
+        
+        # 将订单簿设置到适配器中
         adapter.orderbook_snapshots[market_id] = mock_orderbook
         
+        # 测试创建市场数据
         market_data = adapter._create_market_data(market_id)
         
+        # 验证结果
         assert market_data is not None
         assert market_data.symbol == market_id
         assert market_data.exchange == ExchangeType.POLYMARKET
@@ -529,7 +689,7 @@ class TestPolymarketWebSocketAdapter:
             all_subscribed.update(markets)
         
         for market in all_subscribed:
-            assert market in status["subscribed_symbols"]
+            assert market in status["subscribed_markets"]
         
         # 验证连接详情
         assert "connection_details" in status

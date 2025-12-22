@@ -43,6 +43,7 @@ class WebSocketConnector:
         """建立 WebSocket 连接"""
         try:
             self.session = aiohttp.ClientSession()
+            logger.info(f"connect using session: {self.session}")
             
             # 准备连接参数
             connect_kwargs = {
@@ -73,7 +74,7 @@ class WebSocketConnector:
             if self.on_error:
                 self.on_error(e)
             return False
-            
+
     async def disconnect(self):
         """断开 WebSocket 连接"""
         self.is_connected = False
@@ -85,22 +86,26 @@ class WebSocketConnector:
                 await self._message_task
             except asyncio.CancelledError:
                 pass
-                
+            self._message_task = None  # 清空引用
+            
         # 关闭 WebSocket 连接
         if self.ws:
             await self.ws.close()
-            
+            self.ws = None  # 🎯 关键：清空引用
+        
         # 关闭会话
         if self.session:
+            logger.info(f"closing self.session: {self.session}")
             await self.session.close()
-            
+            self.session = None  # 🎯 关键：清空引用
+        
         logger.info(f"[{self.name}] WebSocket disconnected")
         
     async def send_json(self, data: Dict[str, Any]):
         """发送 JSON 数据"""
         if self.ws and not self.ws.closed:
             await self.ws.send_json(data)
-            logger.debug(f"[{self.name}] Sent JSON message: {data}")
+            logger.info(f"[{self.name}] Sent JSON message: {data}: {self.ws}")
         else:
             logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected: {self.ws}")
             
@@ -108,9 +113,9 @@ class WebSocketConnector:
         """发送文本数据"""
         if self.ws and not self.ws.closed:
             await self.ws.send_str(text)
-            logger.debug(f"[{self.name}] Sent text message: {text}")
+            logger.info(f"[{self.name}] Sent text message: {text}: {self.ws}")
         else:
-            logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected: {self.ws}")
+            logger.warning(f"[{self.name}] Cannot send message: {text}, WebSocket is not connected: {self.ws}")
             
     async def _message_loop(self):
         """消息处理循环 - 健壮版本"""
