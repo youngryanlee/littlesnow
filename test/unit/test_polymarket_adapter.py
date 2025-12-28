@@ -4,6 +4,7 @@ import logging
 from unittest.mock import Mock, patch, AsyncMock, MagicMock, call
 from decimal import Decimal
 from datetime import datetime, timezone
+from collections import deque, defaultdict
 import sys
 import os
 
@@ -119,22 +120,272 @@ class TestPolymarketWebSocketAdapter:
         }
     
     def test_initialization(self, adapter):
-        """测试适配器初始化"""
+        """测试适配器初始化 - 适配新的性能监控结构"""
+        # 基本属性测试
         assert adapter.name == "polymarket"
         assert adapter.exchange_type == ExchangeType.POLYMARKET
         assert adapter.is_connected == False
         assert len(adapter.callbacks) == 0
         assert len(adapter.subscribed_symbols) == 0
         
-        # 🔧 修改：检查多个connector - 使用枚举而不是字符串
+        # 检查多个connector
         assert SubscriptionType.ORDERBOOK in adapter.connectors
         assert SubscriptionType.TRADE in adapter.connectors
         assert SubscriptionType.PRICE in adapter.connectors
         assert SubscriptionType.COMMENT in adapter.connectors
         
-        # WebSocket 版本特有的属性
+        # 🔄 更新：检查新的性能监控结构
         assert adapter.message_count == 0
-        assert adapter.performance_stats["messages_per_second"] == 0
+        assert adapter.last_message_time is None
+        assert adapter.clock_offset_ms == 0
+        
+        # 检查PerformanceMonitor实例
+        assert hasattr(adapter, 'monitor')
+        assert adapter.monitor is not None
+        assert adapter.monitor.window_size == 1000  # 默认值
+        
+        # 检查realtime_stats结构
+        assert "orderbook" in adapter.monitor.realtime_stats
+        assert "last_trade_price" in adapter.monitor.realtime_stats
+        assert "price_change" in adapter.monitor.realtime_stats
+        assert "all" in adapter.monitor.realtime_stats
+        
+        # 检查每个统计项的初始化值
+        for msg_type in ["orderbook", "last_trade_price", "price_change", "all"]:
+            stats = adapter.monitor.realtime_stats[msg_type]
+            assert stats["count"] == 0
+            assert stats["last_time"] is None
+            assert stats["latency_ewma"] == 0.0
+            assert stats["latency_p50"] == 0.0
+            assert stats["latency_p95"] == 0.0
+            assert stats["latency_p99"] == 0.0
+            assert stats["latency_min"] == float('inf')
+            assert stats["latency_max"] == 0.0
+            assert stats["throughput_1s"] == 0.0
+            assert stats["throughput_1m"] == 0.0
+            assert stats["last_update"] is None
+            assert stats["errors"] == 0
+        
+        # 🔧 修改：检查latency_history结构（defaultdict不会预先创建键）
+        assert isinstance(adapter.monitor.latency_history, defaultdict)
+        
+        # 检查默认工厂函数创建的deque属性
+        # 注意：defaultdict只在访问时才创建键，所以初始时可能是空的
+        for msg_type in ["orderbook", "last_trade_price", "price_change", "all"]:
+            # 访问键以创建默认的deque
+            deque_obj = adapter.monitor.latency_history[msg_type]
+            assert isinstance(deque_obj, deque)
+            assert deque_obj.maxlen == adapter.monitor.window_size
+            assert len(deque_obj) == 0  # 初始为空
+        
+        # 🔧 修改：检查其他数据结构是否正确初始化
+        assert isinstance(adapter.orderbook_snapshots, dict)
+        assert isinstance(adapter.last_trade_prices, dict)
+        assert isinstance(adapter.price_changes, dict)
+        assert isinstance(adapter.last_prices, dict)
+        assert isinstance(adapter.best_prices, dict)
+        assert isinstance(adapter.market_cache, dict)
+        assert isinstance(adapter.token_cache, dict)
+        assert adapter.cache_ttl_seconds == 3600
+
+    def test_performance_monitor_update(self, adapter):
+        """测试性能监控器更新功能"""
+        # 模拟更新延迟统计
+        adapter._update_latency_stats("orderbook", 50.0, 1234567890000)
+        
+        # 检查统计更新
+        stats = adapter.monitor.realtime_stats["orderbook"]
+        assert stats["count"] == 1
+        assert stats["latency_ewma"] > 0  # 因为0.9*0 + 50*0.1 = 5.0
+        assert stats["latency_min"] == 50.0
+        assert stats["latency_max"] == 50.0
+        assert stats["last_time"] is not None
+        
+        # 检查延迟历史记录
+        assert len(adapter.monitor.latency_history["orderbook"]) == 1
+        assert adapter.monitor.latency_history["orderbook"][0] == 50.0
+        
+        # 更新"all"统计
+        all_stats = adapter.monitor.realtime_stats["all"]
+        assert all_stats["count"] == 1
+        assert all_stats["latency_ewma"] > 0
+
+    def test_latency_calculation(self, adapter):
+        """测试延迟计算 - 修正版"""
+        base_receive_ts = 1234567890050
+        
+        # 测试1：正常延迟
+        normal_data = {
+            "timestamp": "1234567890000",
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-1"
+        }
+        latency = adapter._calculate_network_latency(normal_data, base_receive_ts)
+        assert latency == 50.0, f"期望50.0，实际{latency}"
+        
+        # 测试2：负延迟
+        negative_data = {
+            "timestamp": "1234567890100",  # 比接收时间晚50ms
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-2"
+        }
+        latency = adapter._calculate_network_latency(negative_data, base_receive_ts)
+        assert latency == -50.0, f"期望-50.0，实际{latency}"
+        
+        # 测试3：缺少时间戳
+        no_timestamp_data = {
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-3"
+        }
+        latency = adapter._calculate_network_latency(no_timestamp_data, base_receive_ts)
+        assert latency is None, f"期望None，实际{latency}"
+        
+        # 测试4：异常高延迟（修正计算错误）
+        # 原错误：1234567890050 - 1234467890000 = 100000050，不是100050
+        high_latency_data = {
+            "timestamp": "1234467890000",
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-4"
+        }
+        latency = adapter._calculate_network_latency(high_latency_data, base_receive_ts)
+        expected_high_latency = 100000050  # 正确的计算结果
+        assert latency == expected_high_latency, f"期望{expected_high_latency}，实际{latency}"
+        
+        # 测试5：无效时间戳格式
+        invalid_timestamp_data = {
+            "timestamp": "not-a-number",
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-5"
+        }
+        latency = adapter._calculate_network_latency(invalid_timestamp_data, base_receive_ts)
+        assert latency is None, f"期望None，实际{latency}"
+        
+        # 测试6：正好边界值（10秒）
+        boundary_data = {
+            "timestamp": str(base_receive_ts - 10000),  # 正好10秒前
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-6"
+        }
+        latency = adapter._calculate_network_latency(boundary_data, base_receive_ts)
+        assert latency == 10000, f"期望10000，实际{latency}"
+        
+        # 测试7：零延迟
+        zero_data = {
+            "timestamp": str(base_receive_ts),  # 与接收时间相同
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-7"
+        }
+        latency = adapter._calculate_network_latency(zero_data, base_receive_ts)
+        assert latency == 0, f"期望0，实际{latency}"
+
+    def test_message_processing_with_latency(self, adapter):
+        """测试带延迟的消息处理"""
+        # 模拟一个交易消息
+        trade_data = {
+            "event_type": "last_trade_price",
+            "asset_id": "test-asset-1",
+            "market": "0x1234567890abcdef1234567890abcdef12345678",
+            "price": "0.65",
+            "size": "1000",
+            "side": "BUY",
+            "timestamp": "1234567890000",
+            "id": "trade-123"
+        }
+        
+        receive_time = datetime.now(timezone.utc)
+        receive_timestamp_ms = int(receive_time.timestamp() * 1000)
+        
+        # 处理消息
+        adapter._handle_raw_message(trade_data)
+        
+        # 检查消息计数
+        assert adapter.message_count == 1
+        
+        # 检查延迟统计被更新
+        stats = adapter.monitor.realtime_stats["last_trade_price"]
+        assert stats["count"] == 1
+        assert stats["latency_ewma"] > 0
+        
+        # 检查交易缓存被更新
+        assert "test-asset-1" in adapter.last_trade_prices
+        trade_price = adapter.last_trade_prices["test-asset-1"]
+        print("trade_price: ", trade_price)
+        assert trade_price.price == Decimal("0.65")
+        assert trade_price.size == Decimal("1000")
+        assert trade_price.side == "BUY"
+        assert trade_price.server_timestamp == 1234567890000
+        assert trade_price.receive_timestamp == receive_timestamp_ms
+
+    def test_monitor_initialization_values(self):
+        """测试性能监控器初始化值"""
+        # 创建适配器
+        adapter = PolymarketAdapter()
+        
+        # 检查默认窗口大小
+        assert adapter.monitor.window_size == 1000
+        
+        # 检查realtime_stats结构完整性
+        expected_keys = ["orderbook", "last_trade_price", "price_change", "all"]
+        for key in expected_keys:
+            assert key in adapter.monitor.realtime_stats
+            
+            stats = adapter.monitor.realtime_stats[key]
+            expected_stat_keys = [
+                "count", "last_time", "latency_ewma", "latency_p50",
+                "latency_p95", "latency_p99", "latency_min", "latency_max",
+                "throughput_1s", "throughput_1m", "last_update", "errors"
+            ]
+            
+            for stat_key in expected_stat_keys:
+                assert stat_key in stats
+                
+        # 注意：latency_history是defaultdict，初始为空
+        # 我们只需要检查它被正确初始化为defaultdict即可
+        assert isinstance(adapter.monitor.latency_history, defaultdict)
+        # 可以检查默认工厂函数是否设置正确
+        assert adapter.monitor.latency_history.default_factory is not None
+        
+        # 或者检查访问某个键时是否能正确创建deque
+        test_deque = adapter.monitor.latency_history["test"]
+        assert isinstance(test_deque, deque)
+        assert test_deque.maxlen == 1000
+
+    def test_performance_monitor_edge_cases(self, adapter):
+        """测试性能监控器边界情况"""
+        # 测试大量消息处理
+        for i in range(1500):  # 超过窗口大小
+            adapter._update_latency_stats("orderbook", float(i), 1234567890000 + i)
+
+        # 检查窗口大小限制
+        assert len(adapter.monitor.latency_history["orderbook"]) == 1000
+
+        # 但是计数是1500
+        assert adapter.monitor.realtime_stats["orderbook"]["count"] == 1500
+
+        # 测试不同消息类型的独立统计
+        adapter._update_latency_stats("orderbook", 100.0, 1234567890000)
+        adapter._update_latency_stats("last_trade_price", 50.0, 1234567890000)
+
+        assert adapter.monitor.realtime_stats["orderbook"]["count"] == 1501
+        assert adapter.monitor.realtime_stats["last_trade_price"]["count"] == 1
+        assert adapter.monitor.realtime_stats["all"]["count"] == 1502
+
+        # 测试EWMA计算 - 使用预定义的消息类型
+        # 重置一个消息类型的统计
+        adapter.monitor.realtime_stats["price_change"] = adapter.monitor._init_message_stats()
+        
+        # 第一个值：0.9*0 + 100*0.1 = 10
+        # 第二个值：0.9*10 + 200*0.1 = 9 + 20 = 29
+        adapter._update_latency_stats("price_change", 100.0, 1234567890000)
+        adapter._update_latency_stats("price_change", 200.0, 1234567890001)
+
+        stats = adapter.monitor.realtime_stats["price_change"]
+        # EWMA计算验证
+        expected_ewma_1 = 100.0 * 0.1  # 第一个值
+        # 由于EWMA的alpha=0.9，第二个值计算：0.9*10 + 200*0.1 = 9 + 20 = 29
+        expected_ewma_2 = 100.0 * 0.1 * 0.9 + 200.0 * 0.1  # 29.0
+        
+        assert abs(stats["latency_ewma"] - expected_ewma_2) < 0.001 
     
     @pytest.mark.asyncio
     async def test_connect_success(self, adapter):
@@ -454,36 +705,76 @@ class TestPolymarketWebSocketAdapter:
         # 模拟回调
         callback_mock = Mock()
         adapter.add_callback(callback_mock)
+
+        receive_timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         
         # 处理订单簿消息
-        adapter._handle_orderbook_update(sample_orderbook_message)
+        adapter._handle_orderbook(sample_orderbook_message, receive_timestamp_ms)
         
         # 检查订单簿状态更新
         assert asset_id in adapter.orderbook_snapshots
-        # 注意：现在使用时间戳作为序列号
-        assert adapter.last_sequence_nums[asset_id] == 1640995200000
         
         orderbook = adapter.orderbook_snapshots[asset_id]
         assert len(orderbook.bids) == 2
         assert len(orderbook.asks) == 2
         assert orderbook.bids[0].price == Decimal("0.65")
         assert orderbook.bids[0].quantity == Decimal("1000")
+        assert orderbook.server_timestamp == int(sample_orderbook_message["timestamp"])
+        assert orderbook.receive_timestamp == receive_timestamp_ms
         
         # 检查回调被调用
         callback_mock.assert_called_once()
     
-    def test_handle_trade_update(self, adapter, sample_trade_message):
-        """测试处理交易更新"""
+    def test_handle_trade_update(self, adapter):
+        """测试处理交易消息"""
         # 模拟回调
         callback_mock = Mock()
         adapter.add_callback(callback_mock)
 
+        # 创建一个完整的 Trade 消息
+        trade_message = {
+            "event_type": "trade",
+            "asset_id": "test-asset-1",
+            "id": "trade-123",
+            "last_update": "1234567890123",
+            "maker_orders": [
+                {
+                    "asset_id": "test-asset-1",
+                    "matched_amount": "50",
+                    "order_id": "maker-order-1",
+                    "outcome": "YES",
+                    "owner": "maker-address",
+                    "price": "0.65"
+                },
+                {
+                    "asset_id": "test-asset-1",
+                    "matched_amount": "50",
+                    "order_id": "maker-order-2",
+                    "outcome": "YES",
+                    "owner": "maker-address-2",
+                    "price": "0.65"
+                }
+            ],
+            "market": "0x1234567890abcdef1234567890abcdef12345678",
+            "matchtime": "1234567890000",
+            "outcome": "YES",
+            "owner": "taker-address",
+            "price": "0.65",
+            "side": "BUY",
+            "size": "100",
+            "status": "MATCHED",
+            "taker_order_id": "taker-order-123",
+            "timestamp": "1234567890123",
+            "trade_owner": "taker-address",
+            "type": "TRADE"
+        }
+
         # 确保市场在订阅列表中
-        asset_id = sample_trade_message["asset_id"]
+        asset_id = trade_message["asset_id"]
         adapter.subscribed_markets[SubscriptionType.TRADE].add(asset_id)
 
         # 处理交易消息
-        adapter._handle_trade_update(sample_trade_message)
+        adapter._handle_trade(trade_message)
 
         # 检查回调被调用
         callback_mock.assert_called_once()
@@ -491,23 +782,42 @@ class TestPolymarketWebSocketAdapter:
         # 检查回调参数
         market_data = callback_mock.call_args[0][0]
         assert isinstance(market_data, MarketData)
-        assert market_data.symbol == sample_trade_message["asset_id"]
+        assert market_data.symbol == trade_message["asset_id"]
         assert market_data.last_price == Decimal("0.65")
         
-        # 检查交易数据
+        # 检查交易数据 - 注意这里检查的是TradePrice对象
         assert market_data.last_trade is not None
         assert market_data.last_trade.price == Decimal("0.65")
-        assert market_data.last_trade.quantity == Decimal("100")
-        assert market_data.last_trade.is_buyer_maker == False
+        assert market_data.last_trade.size == Decimal("100")
+        assert market_data.last_trade.side == "buy"  # 小写
+        
+        # 检查交易历史被更新
+        assert trade_message["asset_id"] in adapter.trade_history
+        assert len(adapter.trade_history[trade_message["asset_id"]]) == 1
+        
+        trade = adapter.trade_history[trade_message["asset_id"]][0]
+        assert trade.id == "trade-123"
+        assert trade.price == Decimal("0.65")
+        assert trade.size == Decimal("100")
+        assert trade.side == "BUY"
+        assert trade.status == "MATCHED"
+        assert len(trade.maker_orders) == 2
+        
+        # 检查最后成交价被更新
+        assert trade_message["asset_id"] in adapter.last_trade_prices
+        trade_price = adapter.last_trade_prices[trade_message["asset_id"]]
+        assert trade_price.price == Decimal("0.65")
+        assert trade_price.size == Decimal("100")
     
     def test_handle_price_change_update(self, adapter, sample_price_change_message):
         """测试处理价格变动更新"""
         # 模拟回调
         callback_mock = Mock()
         adapter.add_callback(callback_mock)
-        
+
         # 处理价格变动消息
-        adapter._handle_price_change_update(sample_price_change_message)
+        receive_timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        adapter._handle_price_change(sample_price_change_message, receive_timestamp_ms)
         
         # 检查回调被调用
         assert callback_mock.call_count == 2
@@ -532,9 +842,9 @@ class TestPolymarketWebSocketAdapter:
         ]
         
         # Mock 所有可能的处理方法
-        with patch.object(adapter, '_handle_orderbook_update') as mock_handle_orderbook, \
-            patch.object(adapter, '_handle_trade_update') as mock_handle_trade, \
-            patch.object(adapter, '_handle_price_change_update') as mock_handle_price_change:
+        with patch.object(adapter, '_handle_orderbook') as mock_handle_orderbook, \
+            patch.object(adapter, '_handle_trade') as mock_handle_trade, \
+            patch.object(adapter, '_handle_price_change') as mock_handle_price_change:
             
             # 执行原始方法
             adapter._handle_raw_message(array_message)
@@ -561,21 +871,51 @@ class TestPolymarketWebSocketAdapter:
     
     def test_handle_raw_message_book(self, adapter, sample_orderbook_message):
         """测试处理订单簿原始消息"""
-        with patch.object(adapter, '_handle_orderbook_update') as mock_handler:
+        with patch.object(adapter, '_handle_orderbook') as mock_handler:
             adapter._handle_raw_message(sample_orderbook_message)
-            mock_handler.assert_called_once_with(sample_orderbook_message)
+            
+            # 检查方法被调用，包含消息和时间戳两个参数
+            mock_handler.assert_called_once()
+            
+            # 获取调用参数
+            args = mock_handler.call_args[0]
+            
+            # 应该有两个参数
+            assert len(args) == 2
+            # 第一个参数是消息数据
+            assert args[0] == sample_orderbook_message
+            # 第二个参数是整数时间戳
+            assert isinstance(args[1], int)
+            # 时间戳应该是一个合理的值（当前时间附近的毫秒时间戳）
+            current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+            # 时间戳应该在合理范围内（比如最近10秒内）
+            assert abs(args[1] - current_timestamp) < 10000  # 10秒内
     
     def test_handle_raw_message_trade(self, adapter, sample_trade_message):
         """测试处理交易原始消息"""
-        with patch.object(adapter, '_handle_trade_update') as mock_handler:
+        with patch.object(adapter, '_handle_trade') as mock_handler:
             adapter._handle_raw_message(sample_trade_message)
             mock_handler.assert_called_once_with(sample_trade_message)
     
     def test_handle_raw_message_price_change(self, adapter, sample_price_change_message):
         """测试处理价格变动原始消息"""
-        with patch.object(adapter, '_handle_price_change_update') as mock_handler:
+        with patch.object(adapter, '_handle_price_change') as mock_handler:
             adapter._handle_raw_message(sample_price_change_message)
-            mock_handler.assert_called_once_with(sample_price_change_message)
+            mock_handler.assert_called_once()
+
+            # 获取调用参数
+            args = mock_handler.call_args[0]
+            
+            # 应该有两个参数
+            assert len(args) == 2
+            # 第一个参数是消息数据
+            assert args[0] == sample_price_change_message
+            # 第二个参数是整数时间戳
+            assert isinstance(args[1], int)
+            # 时间戳应该是一个合理的值（当前时间附近的毫秒时间戳）
+            current_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+            # 时间戳应该在合理范围内（比如最近10秒内）
+            assert abs(args[1] - current_timestamp) < 10000  # 10秒内
     
     def test_handle_raw_message_unknown_type(self, adapter):
         """测试处理未知类型的消息"""
@@ -801,25 +1141,6 @@ class TestPolymarketWebSocketAdapter:
             # 使用 assert_has_calls 而不是 assert_called_once_with
             mock_subscribe.assert_has_calls(expected_calls, any_order=True)
     
-    @pytest.mark.asyncio
-    async def test_performance_monitor(self, adapter):
-        """测试性能监控"""
-        adapter.is_connected = True
-        adapter.message_count = 50
-        
-        # 运行性能监控一小段时间
-        monitor_task = asyncio.create_task(adapter._performance_monitor())
-        await asyncio.sleep(0.1)
-        monitor_task.cancel()
-        
-        try:
-            await monitor_task
-        except asyncio.CancelledError:
-            pass
-        
-        # 性能统计应该被更新
-        assert adapter.performance_stats["last_update"] is not None
-    
     def test_handle_connection_error(self, adapter):
         """测试连接错误处理"""
         adapter.is_connected = True
@@ -849,13 +1170,15 @@ class TestPolymarketWebSocketAdapter:
         market_id = "0x1234567890abcdef1234567890abcdef12345678"
         bids = [{"price": "0.65", "size": "1000"}, {"price": "0.64", "size": "500"}]
         asks = [{"price": "0.66", "size": "800"}, {"price": "0.67", "size": "1200"}]
-        sequence_num = 1000
+        receive_timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        server_timestamp = receive_timestamp_ms - 1000
         
-        adapter._update_orderbook(market_id, bids, asks, sequence_num)
+        adapter._update_orderbook(market_id, bids, asks, server_timestamp, receive_timestamp_ms)
         
         # 检查订单簿被更新
         assert market_id in adapter.orderbook_snapshots
-        assert adapter.last_sequence_nums[market_id] == sequence_num
+        assert adapter.orderbook_snapshots[market_id].server_timestamp == server_timestamp
+        assert adapter.orderbook_snapshots[market_id].receive_timestamp == receive_timestamp_ms
         
         orderbook = adapter.orderbook_snapshots[market_id]
         assert len(orderbook.bids) == 2

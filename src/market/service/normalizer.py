@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 from decimal import Decimal
 from datetime import datetime
 
-from ..core.data_models import MarketData, OrderBook, OrderBookLevel, Trade, ExchangeType, MarketType
+from ..core.data_models import MarketData, OrderBook, OrderBookLevel, TradePrice, ExchangeType, MarketType
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class DataNormalizer:
                           exchange: ExchangeType, 
                           market_type: MarketType,
                           orderbook: Optional[OrderBook] = None,
-                          last_trade: Optional[Trade] = None,
+                          last_trade: Optional[TradePrice] = None,
                           last_price: Optional[Decimal] = None,
                           timestamp: Optional[datetime] = None) -> MarketData:
         """创建标准化的市场数据对象"""

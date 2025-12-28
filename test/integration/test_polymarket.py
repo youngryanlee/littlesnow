@@ -281,7 +281,7 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
             elif data.last_trade or data.last_price:
                 trade_data.append(data)
                 if data.last_trade:
-                    logger.info(f"💹 交易: {data.last_trade.quantity} @ {data.last_trade.price}")
+                    logger.info(f"💹 交易: {data.last_trade.size} @ {data.last_trade.price}")
                 elif data.last_price:
                     logger.info(f"💹 价格更新: {data.last_price}")
         
@@ -296,6 +296,7 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
             
             # 检查连接状态
             status = ws_manager.get_connection_status()
+            print("========>>>>>>>>status: ", status)
             if not status.get('polymarket', False):
                 logger.warning("❌ Polymarket 连接失败，跳过测试")
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")

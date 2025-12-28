@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from decimal import Decimal
 from datetime import datetime, timezone
 from enum import Enum
@@ -45,14 +45,30 @@ class OrderBook:
         if not self.bids or not self.asks:
             return Decimal('0')
         return (self.bids[0].price + self.asks[0].price) / 2
+    
+    def get_latency(self):
+        return self.receive_timestamp - self.server_timestamp
 
 @dataclass(frozen=True)
-class Trade:
+class TradePrice:
+    asset_id: str
     trade_id: str
     price: Decimal
-    quantity: Decimal
-    timestamp: datetime
-    is_buyer_maker: bool
+    size: Decimal
+    side: Literal["BUY", "SELL"]
+    server_timestamp: int
+    receive_timestamp: int
+
+@dataclass(frozen=True)
+class PriceChange:
+    asset_id: str
+    price: Decimal
+    size: Decimal
+    side: Literal["BUY", "SELL"]
+    server_timestamp: int
+    receive_timestamp: int
+    best_bid: Decimal
+    best_ask: Decimal
 
 class MarketStatus(Enum):
     """市场状态枚举"""
@@ -281,7 +297,7 @@ class MarketData:
     
     # 可选字段
     orderbook: Optional[OrderBook] = None
-    last_trade: Optional[Trade] = None
+    last_trade: Optional[TradePrice] = None
     last_price: Optional[Decimal] = None
     volume_24h: Optional[Decimal] = None
     price_change_24h: Optional[Decimal] = None
@@ -401,3 +417,33 @@ class MarketSnapshot:
                 for exchange, data in self.exchange_data.items()
             }
         }
+
+@dataclass(frozen=True)
+class MakerOrder:
+    asset_id: str
+    matched_amount: float
+    order_id: str
+    outcome: str
+    owner: str
+    price: Decimal
+    receive_timestamp: int
+
+@dataclass(frozen=True)
+class Trade:
+    asset_id: str
+    id: str
+    last_update: int
+    maker_orders: List[MakerOrder]
+    market: str
+    matchtime: int
+    outcome: str
+    owner: str
+    price: Decimal
+    side: Literal["BUY", "SELL"]
+    size: Decimal
+    status: str
+    taker_order_id: str
+    trade_owner: str
+    server_timestamp: int
+    receive_timestamp: int
+

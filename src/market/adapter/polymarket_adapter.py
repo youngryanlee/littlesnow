@@ -3,7 +3,8 @@ import json
 import time
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Union
+from collections import deque, defaultdict
+from typing import Optional, List, Dict, Union, Deque
 import aiohttp
 from enum import Enum
 from dataclasses import dataclass
@@ -12,14 +13,14 @@ from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector
-from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, Trade
+from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, TradePrice, PriceChange, MakerOrder, Trade
 
 logger = get_logger()
 
 class SubscriptionType(Enum):
     """订阅类型枚举"""
-    ORDERBOOK = "orderbook"      # 订单簿数据
-    TRADE = "trade"           # 交易数据
+    ORDERBOOK = "orderbook"      #market channel订单簿数据
+    TRADE = "trade"           # User channel交易数据
     PRICE = "price"      # Binance 价格
     PRICE_CHAINLINK = "price_chainlink"  # Chainlink 价格
     COMMENT = "comment"           # 评论数据
@@ -40,6 +41,41 @@ class CachedMarket:
     
     def is_expired(self, ttl: int) -> bool:
         return time.time() - self.timestamp > ttl    
+    
+class PerformanceMonitor:
+    """延迟监控器"""
+    
+    def __init__(self, window_size: int = 1000):
+        # 延迟历史窗口
+        self.window_size = window_size
+        self.latency_history: Dict[str, Deque[float]] = defaultdict(
+            lambda: deque(maxlen=window_size)
+        )
+        
+        # 实时统计
+        self.realtime_stats = {
+            "orderbook": self._init_message_stats(),
+            "last_trade_price": self._init_message_stats(),
+            "price_change": self._init_message_stats(),
+            "all": self._init_message_stats()
+        }
+        
+    def _init_message_stats(self) -> Dict:
+        """初始化消息统计数据结构"""
+        return {
+            "count": 0,
+            "last_time": None,
+            "latency_ewma": 0.0,      # 指数加权平均
+            "latency_p50": 0.0,       # 中位数
+            "latency_p95": 0.0,       # 95百分位
+            "latency_p99": 0.0,       # 99百分位
+            "latency_min": float('inf'),
+            "latency_max": 0.0,
+            "throughput_1s": 0.0,     # 每秒消息数
+            "throughput_1m": 0.0,     # 每分钟消息数
+            "last_update": None,
+            "errors": 0
+        }    
 
 class PolymarketAdapter(BaseAdapter):
     """Polymarket WebSocket 适配器 - 毫秒级性能"""
@@ -48,10 +84,14 @@ class PolymarketAdapter(BaseAdapter):
         super().__init__("polymarket", ExchangeType.POLYMARKET)
 
         # 市场数据状态
-        self.orderbook_snapshots: Dict[str, OrderBook] = {}
-        self.last_sequence_nums: Dict[str, int] = {}
-        self.pending_updates: Dict[str, List[dict]] = {}
-        self.last_trade_prices = {}    # asset_id -> 最后成交信息
+        self.orderbook_snapshots: Dict[str, OrderBook] = {} # asset_id -> 最新订单薄，对用BOOK消息
+        self.last_trade_prices: Dict[str, TradePrice] = {}    # asset_id -> 最后成交信息，对应last_trade_price消息
+        self.price_changes: Dict[str, Deque[PriceChange]] = {} # asset_id -> 价格变化信息信息，对应price_change消息
+        self.trade_history: Dict[str, List[Trade]] = {}  # asset_id -> 交易历史列表se
+
+        # 计算聚合数据
+        self.last_prices= {}    # asset_id -> 最后价格信息，last_trade_price消息和price_change消息都会更新
+        self.best_prices= {}    # asset_id -> 最优价格信息
 
         # 🎯 缓存系统：只缓存核心数据
         self.market_cache = {}  # market_id -> CachedMarket
@@ -61,11 +101,9 @@ class PolymarketAdapter(BaseAdapter):
         # 性能监控
         self.message_count = 0
         self.last_message_time = None
-        self.performance_stats = {
-            "messages_per_second": 0,
-            "average_latency": 0,
-            "last_update": datetime.now(timezone.utc)
-        }
+        self.monitor = PerformanceMonitor()
+        # 时钟同步状态（用于校准）
+        self.clock_offset_ms = 0  # 本地时钟 - 服务器时钟#
 
         self.rest_urls = [
             "https://gamma-api.polymarket.com",
@@ -174,10 +212,6 @@ class PolymarketAdapter(BaseAdapter):
         # 订单簿相关状态（从基类继承，确保存在）
         if not hasattr(self, 'orderbook_snapshots'):
             self.orderbook_snapshots = {}
-        if not hasattr(self, 'last_sequence_nums'):
-            self.last_sequence_nums = {}
-        if not hasattr(self, 'pending_updates'):
-            self.pending_updates = {}
         
         # 交易相关状态
         self.trade_history = {}  # market_id -> List[Trade]
@@ -190,7 +224,7 @@ class PolymarketAdapter(BaseAdapter):
         
         # 性能监控
         self.message_count_by_type = {sub_type: 0 for sub_type in SubscriptionType}        
-        
+
     async def connect(self) -> bool:
         """连接所有端点"""
         try:
@@ -223,9 +257,6 @@ class PolymarketAdapter(BaseAdapter):
                     await asyncio.sleep(0.5)  # 给连接一点时间稳定
                     await self._resubscribe_all()
                 
-                # 启动性能监控
-                asyncio.create_task(self._performance_monitor())
-                
                 return True
             else:
                 logger.error("❌ Some WebSocket endpoints failed to connect")
@@ -244,8 +275,6 @@ class PolymarketAdapter(BaseAdapter):
             
             tasks = []
             for sub_type, connector in self.connectors.items():
-                print("sub_type:", sub_type)
-                print("connector:", connector)
                 tasks.append(connector.disconnect())
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -478,8 +507,6 @@ class PolymarketAdapter(BaseAdapter):
         for market_id in market_ids:
             if market_id in self.orderbook_snapshots:
                 del self.orderbook_snapshots[market_id]
-            if market_id in self.last_sequence_nums:
-                del self.last_sequence_nums[market_id]
             
         logger.info(f"✅ CLOB 取消订阅成功: {subscription_type.value} - {len(market_ids)} 个market")        
 
@@ -594,8 +621,6 @@ class PolymarketAdapter(BaseAdapter):
             # 清理订单簿状态
             for asset_id in asset_ids:
                 self.orderbook_snapshots.pop(asset_id, None)
-                self.last_sequence_nums.pop(asset_id, None)
-                self.pending_updates.pop(asset_id, None)
                 
         elif subscription_type == SubscriptionType.TRADE:
             # 清理交易状态
@@ -619,14 +644,9 @@ class PolymarketAdapter(BaseAdapter):
         try:
             self.message_count += 1
             current_time = datetime.now(timezone.utc)
+            receive_timestamp_ms = int(current_time.timestamp() * 1000)
+            self.last_message_time = receive_timestamp_ms   
             
-            # 性能监控
-            if self.last_message_time:
-                latency = (current_time - self.last_message_time).total_seconds() * 1000
-                self.performance_stats["average_latency"] = (
-                    self.performance_stats["average_latency"] * 0.9 + latency * 0.1
-                )
-            self.last_message_time = current_time
             
             # 处理不同类型的消息格式
             if isinstance(raw_data, list):
@@ -645,33 +665,47 @@ class PolymarketAdapter(BaseAdapter):
             message_type = raw_data.get('event_type')
             market_id = raw_data.get('market', None)
             asset_id = raw_data.get('asset_id', None)
+            print("========>>>>>>>>message_type: ", message_type)
+            print("========>>>>>>>>current_time:", current_time, "receive_timestamp_ms: ", receive_timestamp_ms)
+            st = int(raw_data.get('timestamp'))
+            dt = datetime.fromtimestamp(st / 1000, tz=timezone.utc)
+            print("========>>>>>>>>server_time:", dt, "server_timestamp_ms: ", st)
+            print("========>>>>>>>>delta: ", current_time - dt)
+
+            # 计算网络延迟
+            latency_ms = self._calculate_network_latency(raw_data, receive_timestamp_ms)
+            
+            # 更新延迟统计
+            if latency_ms is not None:
+                self._update_latency_stats(message_type, latency_ms, receive_timestamp_ms)
+ 
                 
             # 根据消息类型处理
             if message_type == 'book':
                 if not asset_id:
                     return
                 logger.info(f"📨 收到订单簿更新: {asset_id}")
-                self._handle_orderbook_update(raw_data)
+                self._handle_orderbook(raw_data, receive_timestamp_ms)
+
+            elif message_type == 'price_change':
+                if not market_id:
+                    return
+                logger.info(f"📨 Received price change for {market_id}")
+                self._handle_price_change(raw_data, receive_timestamp_ms)    
                 
             elif message_type == 'last_trade_price':
                 if not asset_id:
                     return
                 logger.info(f"💡 收到最新成交价: {asset_id} 价格 {raw_data.get('price')}")
                 # 专门处理最新成交价
-                self._handle_last_trade_price(raw_data)
+                self._handle_last_trade_price(raw_data, receive_timestamp_ms)
                 
-            elif message_type == 'trade':
+            elif message_type == 'trade': # user channel，暂不支持
                 if not asset_id:
                     return
                 logger.info(f"🔄 收到交易状态更新: 交易ID {raw_data.get('id')}")
                 # 专门处理详尽的交易状态更新
-                self._handle_trade_update(raw_data)
-                
-            elif message_type == 'price_change':
-                if not market_id:
-                    return
-                logger.info(f"📨 Received price change for {market_id}")
-                self._handle_price_change_update(raw_data)
+                self._handle_trade(raw_data)
 
             elif message_type == 'heartbeat':
                 logger.debug(f"❤️  Received heartbeat")
@@ -687,25 +721,25 @@ class PolymarketAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"❌ Error processing WebSocket message: {e}")
             
-    def _handle_orderbook_update(self, data: Dict):
+    def _handle_orderbook(self, data: Dict, receive_timestamp: int):
         """处理订单簿更新 - 高性能版本"""
         try:
-            print("data:", data)
             asset_id = data['asset_id']
             timestamp = data.get('timestamp', 0)
             bids = data.get('bids', [])
             asks = data.get('asks', [])
             
             # 检查序列号连续性
-            sequence_num = int(timestamp) if timestamp and str(timestamp).isdigit() else 0
-            last_seq = self.last_sequence_nums.get(asset_id, 0)
-            if sequence_num <= last_seq:
-                last_orderbook = self.orderbook_snapshots.get(asset_id, {})
-                logger.warning(f"🔍 Skipping old update for {asset_id}: {sequence_num} <= {last_seq}, last data: {last_orderbook}, current data: {data}")
-                return
+            server_timestamp = int(timestamp) if timestamp and str(timestamp).isdigit() else 0
+            last_orderbook = self.orderbook_snapshots.get(asset_id, {})
+            if last_orderbook:
+                last_timestamp = last_orderbook.server_timestamp
+                if server_timestamp <= last_timestamp:
+                    logger.warning(f"🔍 Skipping old update for {asset_id}: {server_timestamp} <= {last_timestamp}, last data: {last_orderbook}, current data: {data}")
+                    return
                 
             # 更新订单簿
-            self._update_orderbook(asset_id, bids, asks, sequence_num)
+            self._update_orderbook(asset_id, bids, asks, server_timestamp, receive_timestamp)
             
             # 生成市场数据
             logger.info(f"To create market data for {asset_id}")
@@ -719,7 +753,7 @@ class PolymarketAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"❌ Error processing orderbook update: {e}")
             
-    def _update_orderbook(self, asset_id: str, bids: List, asks: List, sequence_num: int):
+    def _update_orderbook(self, asset_id: str, bids: List, asks: List, server_timestamp: int, receive_timestamp: int):
         """更新订单簿状态"""
         try:
             # 转换 bids
@@ -750,85 +784,18 @@ class PolymarketAdapter(BaseAdapter):
             self.orderbook_snapshots[asset_id] = OrderBook(
                 bids=bid_levels,
                 asks=ask_levels,
-                server_timestamp=sequence_num,
-                receive_timestamp=datetime.now(timezone.utc).timestamp,
+                server_timestamp=server_timestamp,
+                receive_timestamp=receive_timestamp,
                 symbol=asset_id
             )
-            
-            self.last_sequence_nums[asset_id] = sequence_num
             
         except Exception as e:
             logger.error(f"❌ Error updating orderbook: {e}")
             # 添加更详细的错误信息
             logger.error(f"Bids: {bids}")
             logger.error(f"Asks: {asks}")
-            
-    def _handle_trade_update(self, data: Dict):
-        """处理交易更新 - 直接修改现有订单簿"""
-        try:
-            asset_id = data['asset_id']
-            price = Decimal(data['price'])
-            quantity = Decimal(data['size'])
-            side = data['side']
-            timestamp = datetime.fromtimestamp(int(data['timestamp']) / 1000, tz=timezone.utc)
-            
-            # 创建 Trade 对象
-            trade = Trade(
-                trade_id=f"{asset_id}_{timestamp.timestamp()}",
-                price=price,
-                quantity=quantity,
-                timestamp=timestamp,
-                is_buyer_maker=(side == 'sell')
-            )
-            
-            # 🚨 直接修改现有订单簿
-            if asset_id in self.orderbook_snapshots:
-                orderbook = self.orderbook_snapshots[asset_id]
-                updated = False
-                
-                if side == 'buy':
-                    # 查找并减少卖单数量
-                    for ask in orderbook.asks:
-                        if ask.price == price:
-                            ask.quantity -= quantity
-                            if ask.quantity <= 0:
-                                orderbook.asks.remove(ask)
-                            updated = True
-                            break
-                else:  # 'sell'
-                    # 查找并减少买单数量
-                    for bid in orderbook.bids:
-                        if bid.price == price:
-                            bid.quantity -= quantity
-                            if bid.quantity <= 0:
-                                orderbook.bids.remove(bid)
-                            updated = True
-                            break
-                
-                if updated:
-                    orderbook.timestamp = datetime.now(timezone.utc)
-                    # 重新排序（如果必要）
-                    orderbook.bids.sort(key=lambda x: x.price, reverse=True)
-                    orderbook.asks.sort(key=lambda x: x.price)
-            
-            # ✅ 统一使用 _create_market_data
-            market_data = self._create_market_data(
-                asset_id=asset_id,
-                last_price=price,
-                last_trade=trade,
-                external_timestamp=timestamp
-            )
-            
-            if market_data:
-                self._notify_callbacks(market_data)
-                logger.info(f"💹 Trade update for {asset_id}: {side} {quantity} @ {price}")
-            else:
-                logger.warning(f"⚠️ Could not create market data for trade: {asset_id}")
-                
-        except Exception as e:
-            logger.error(f"❌ Error processing trade update: {e}")
 
-    def _handle_last_trade_price(self, data: Dict):  # 函数重命名
+    def _handle_last_trade_price(self, data: Dict, receive_timestamp: int):  # 函数重命名
         """处理最新成交价消息：更新市场公共行情"""
         try:
             # 注意：这里data来自`last_trade_price`消息，字段是`asset_id`和`market`
@@ -836,30 +803,23 @@ class PolymarketAdapter(BaseAdapter):
             condition_id = data['market']
             price = Decimal(data['price'])
             size = Decimal(data['size'])
-            side = data['side'].lower()  # 注意：消息中是 'BUY'/'SELL'
-            timestamp = datetime.fromtimestamp(int(data['timestamp']) / 1000, tz=timezone.utc)
+            side = data['side']  # 注意：消息中是 'BUY'/'SELL'
+            server_timestamp = int(data['timestamp'])
             
             # 1. 创建Trade对象（如果需要）
-            trade = Trade(
-                trade_id=f"{asset_id}_{timestamp.timestamp()}",
+            trade = TradePrice(
+                trade_id=f"{asset_id}_{server_timestamp}",
+                asset_id=asset_id,
                 price=price,
-                quantity=size,
-                timestamp=timestamp,
-                is_buyer_maker=(side == 'sell')  # 注意转换逻辑
+                size=size,
+                side = side,
+                server_timestamp = server_timestamp,
+                receive_timestamp = receive_timestamp
             )
             
-            # 2. 【重要】不再直接修改self.orderbook_snapshots
-            # 因为公共订单簿应仅由 `book` 消息维护，成交价是结果而非原因。
-            # 如果你有独立的价格跟踪需求，存入另一个字典：
-            self.last_trade_prices[asset_id] = {
-                'price': price,
-                'size': size,
-                'side': side,
-                'timestamp': timestamp,
-                'trade_obj': trade
-            }
+            self.last_trade_prices[asset_id] = trade
             
-            # 3. 生成市场数据，触发回调
+            # 2. 生成市场数据，触发回调
             # 你需要确保_create_market_data能通过asset_id找到对应订单簿，并填入last_price
             market_data = self._create_market_data(
                 asset_id=asset_id,
@@ -873,62 +833,69 @@ class PolymarketAdapter(BaseAdapter):
         except Exception as e:
             logger.error(f"❌ 处理最新成交价失败: {e}")    
 
-    def _handle_price_change_update(self, data: Dict):
-        """处理价格变动更新"""
+    def _handle_price_change(self, data: Dict, receive_timestamp: int):
+        """处理价格变动更新（非成交、非订单簿）"""
         try:
-            print(data)
             market_id = data.get('market')
             price_changes = data.get('price_changes', [])
-            timestamp_raw = data.get('timestamp')
-            
-            if not market_id or not price_changes:
-                logger.warning(f"价格变动消息缺少必要字段: market_id={market_id}, price_changes={len(price_changes)}")
-                return
-                
-            logger.info(f"📊 处理价格变动消息: {market_id}, 包含 {len(price_changes)} 个资产")
+            server_timestamp = data.get('timestamp')
 
-            # 处理时间戳
-            timestamp = None
-            if timestamp_raw:
-                try:
-                    timestamp_ms = int(timestamp_raw)
-                    timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=timezone.utc)
-                except (ValueError, TypeError):
-                    pass  # 保持 None，让 _create_market_data 使用默认时间
-            
-            for price_change in price_changes:
-                asset_id = price_change.get('asset_id')
-                price = price_change.get('price')
-                size = price_change.get('size')
-                side = price_change.get('side')  # BUY 或 SELL
-                best_bid = price_change.get('best_bid')
-                best_ask = price_change.get('best_ask')
-                
-                if not all([asset_id, price, side]):
-                    logger.warning(f"价格变动数据不完整: {price_change}")
+            if not market_id or not price_changes:
+                return
+
+            for pc in price_changes:
+                asset_id = pc.get('asset_id')
+                price = pc.get('price')
+                size = pc.get('size')
+                side = pc.get('side')
+                best_bid = pc.get('best_bid')
+                best_ask = pc.get('best_ask')
+
+                if not asset_id or not price:
                     continue
-                    
-                
-                # 生成市场数据
-                logger.debug(f"为资产 {asset_id} 生成市场数据")
-                # 🎯 使用统一方法创建市场数据
+
+                price_change = PriceChange(
+                    asset_id = asset_id,
+                    price = Decimal(price),
+                    size = size,
+                    side = side,
+                    server_timestamp = server_timestamp,
+                    receive_timestamp = receive_timestamp,
+                    best_bid = Decimal(best_bid),
+                    best_ask = Decimal(best_ask)
+            )
+
+                # ① 原始 price_change 缓存（用于验证/回放）
+                self.price_changes.setdefault(
+                    asset_id, deque(maxlen=200)
+                ).append(price_change)
+
+                # ② 聚合“最新价格状态”
+                self.last_prices[asset_id] = {
+                    'price': price,
+                    'timestamp': server_timestamp,
+                    'source': 'price_change'
+                }
+
+                # ③ 聚合最优报价（策略直接用）
+                if best_bid and best_ask:
+                    self.best_prices[asset_id] = {
+                        'bid': Decimal(best_bid),
+                        'ask': Decimal(best_ask),
+                        'timestamp': server_timestamp
+                    }
+
+                # ④ 生成 MarketData（不动 orderbook）
                 market_data = self._create_market_data(
                     asset_id=asset_id,
                     last_price=price,
-                    external_timestamp=timestamp
+                    external_timestamp=server_timestamp
                 )
                 if market_data:
-                    logger.info(f"价格变动回调: {market_data}")
                     self._notify_callbacks(market_data)
-                
-                # 如果需要，可以更新本地订单簿的最优报价
-                if best_bid and best_ask:
-                    self._update_market_best_prices(market_id, asset_id, best_bid, best_ask)
-                    
-            logger.info(f"✅ 价格变动处理完成: {market_id}")
-            
+
         except Exception as e:
-            logger.error(f"❌ Error processing price change update: {e}")
+            logger.error(f"price_change 处理失败: {e}")
 
     def _update_market_best_prices(self, market_id: str, asset_id: str, best_bid: str, best_ask: str):
         """更新市场最优报价"""
@@ -939,7 +906,135 @@ class PolymarketAdapter(BaseAdapter):
             logger.debug(f"更新最优报价: market={market_id}, asset={asset_id}, bid={best_bid}, ask={best_ask}")
             
         except Exception as e:
-            logger.error(f"更新最优报价失败: {e}")        
+            logger.error(f"更新最优报价失败: {e}")   
+
+    def _handle_trade(self, data: Dict):
+        """处理交易消息 - 更新订单簿和交易历史"""
+        try:
+            # 解析 Trade 消息的完整结构
+            asset_id = data['asset_id']
+            trade_id = data['id']
+            last_update = int(data['last_update'])
+            maker_orders_data = data['maker_orders']
+            market = data['market']
+            matchtime = int(data['matchtime'])
+            outcome = data['outcome']
+            owner = data['owner']
+            price = Decimal(data['price'])
+            side = data['side']  # BUY/SELL
+            size = Decimal(data['size'])
+            status = data['status']
+            taker_order_id = data['taker_order_id']
+            timestamp = int(data['timestamp'])
+            trade_owner = data['trade_owner']
+            msg_type = data['type']
+            
+            # 创建 MakerOrder 对象列表
+            maker_orders = []
+            for maker_data in maker_orders_data:
+                maker_order = MakerOrder(
+                    asset_id=maker_data['asset_id'],
+                    matched_amount=float(maker_data['matched_amount']),
+                    order_id=maker_data['order_id'],
+                    outcome=maker_data['outcome'],
+                    owner=maker_data['owner'],
+                    price=Decimal(maker_data['price']),
+                    receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000)
+                )
+                maker_orders.append(maker_order)
+            
+            # 创建 Trade 对象
+            trade = Trade(
+                asset_id=asset_id,
+                id=trade_id,
+                last_update=last_update,
+                maker_orders=maker_orders,
+                market=market,
+                matchtime=matchtime,
+                outcome=outcome,
+                owner=owner,
+                price=price,
+                side=side,
+                size=size,
+                status=status,
+                taker_order_id=taker_order_id,
+                trade_owner=trade_owner,
+                server_timestamp=timestamp,
+                receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+            
+            # 更新订单簿
+            if asset_id in self.orderbook_snapshots:
+                orderbook = self.orderbook_snapshots[asset_id]
+                updated = False
+                
+                # 根据交易方向和maker_orders更新订单簿
+                for maker_order in maker_orders:
+                    if side == 'BUY':
+                        # taker是买家，maker是卖家，从卖单中移除
+                        for ask in orderbook.asks:
+                            if ask.price == maker_order.price:
+                                # 减少订单数量
+                                ask.quantity -= Decimal(str(maker_order.matched_amount))
+                                if ask.quantity <= 0:
+                                    orderbook.asks.remove(ask)
+                                updated = True
+                                break
+                    else:  # 'SELL'
+                        # taker是卖家，maker是买家，从买单中移除
+                        for bid in orderbook.bids:
+                            if bid.price == maker_order.price:
+                                # 减少订单数量
+                                bid.quantity -= Decimal(str(maker_order.matched_amount))
+                                if bid.quantity <= 0:
+                                    orderbook.bids.remove(bid)
+                                updated = True
+                                break
+                
+                if updated:
+                    orderbook.timestamp = datetime.now(timezone.utc)
+                    # 重新排序
+                    orderbook.bids.sort(key=lambda x: x.price, reverse=True)
+                    orderbook.asks.sort(key=lambda x: x.price)
+            
+            # 存储交易历史
+            if asset_id not in self.trade_history:
+                self.trade_history[asset_id] = []
+            
+            self.trade_history[asset_id].append(trade)
+            # 保持最近N笔交易
+            if len(self.trade_history[asset_id]) > 1000:
+                self.trade_history[asset_id] = self.trade_history[asset_id][-1000:]
+            
+            # 更新最后成交价
+            trade_price_obj = TradePrice(
+                trade_id=trade_id,
+                asset_id=asset_id,
+                price=price,
+                size=size,
+                side=side.lower(),  # 转换为小写以保持一致性
+                server_timestamp=datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc),
+                receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000)
+            )
+            self.last_trade_prices[asset_id] = trade_price_obj
+            
+            # 生成市场数据
+            market_data = self._create_market_data(
+                asset_id=asset_id,
+                last_price=price,
+                last_trade=trade_price_obj,
+                external_timestamp=datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+            )
+            
+            if market_data:
+                self._notify_callbacks(market_data)
+                logger.info(f"💹 Trade processed for {asset_id}: {side} {size} @ {price} (status: {status})")
+            else:
+                logger.warning(f"⚠️ Could not create market data for trade: {asset_id}")
+                
+        except Exception as e:
+            logger.error(f"❌ Error processing trade message: {e}")
+            logger.error(f"   Data: {data}")        
             
     def _handle_heartbeat(self, data: Dict):
         """处理心跳消息"""
@@ -956,7 +1051,7 @@ class PolymarketAdapter(BaseAdapter):
         asset_id: str,
         # 可选的新参数，提供默认值以保持向后兼容
         last_price: Optional[Union[str, Decimal]] = None,
-        last_trade: Optional[Trade] = None,
+        last_trade: Optional[TradePrice] = None,
         external_timestamp: Optional[datetime] = None
     ) -> Optional[MarketData]:
         """
@@ -1011,8 +1106,7 @@ class PolymarketAdapter(BaseAdapter):
         
     '''
         错误处理接口
-    '''    
-            
+    '''            
     def _handle_connection_error(self, st, error: Exception):
         """处理连接错误"""
         logger.error(f"❌ Polymarket WebSocket connection for {st} error: {error}")
@@ -1038,35 +1132,112 @@ class PolymarketAdapter(BaseAdapter):
             logger.error(f"❌ Reconnection attempt failed: {e}")
 
     '''
-        状态监控接口
+        监控接口
     '''               
-    async def _performance_monitor(self):
-        """性能监控循环"""
-        while self.is_connected:
-            try:
-                # 计算每秒消息数
-                current_time = datetime.now(timezone.utc)
-                time_diff = (current_time - self.performance_stats["last_update"]).total_seconds()
+    def _calculate_network_latency(self, data: Dict, receive_timestamp_ms: int) -> Optional[float]:
+        """计算网络延迟 - 保持数据真实性"""
+        try:
+            # 获取服务器时间戳
+            server_ts_str = data.get('timestamp')
+            if not server_ts_str:
+                return None
+                   
+            server_ts = int(server_ts_str)
+            
+            # 计算原始延迟
+            raw_latency_ms = receive_timestamp_ms - server_ts
+            
+            # ✅ 不进行任何修正，保持原始值
+            # 这样可以：
+            # 1. 发现负延迟（时钟不同步）
+            # 2. 发现高延迟（网络问题）
+            # 3. 保持数据真实性
+            
+            # 记录异常情况，但不修正数据
+            if raw_latency_ms < 0:
+                logger.warning(f"负延迟: {raw_latency_ms}ms (服务器时间可能比本地晚)")
                 
-                if time_diff >= 1.0:  # 每秒更新一次
-                    self.performance_stats["messages_per_second"] = self.message_count / time_diff
-                    self.message_count = 0
-                    self.performance_stats["last_update"] = current_time
-                    
-                    # 记录性能指标（可选）
-                    if self.performance_stats["messages_per_second"] > 10:  # 高频率时才记录
-                        logger.debug(
-                            f"📊 Performance: {self.performance_stats['messages_per_second']:.1f} msg/s, "
-                            f"latency: {self.performance_stats['average_latency']:.2f}ms"
-                        )
+            elif raw_latency_ms > 10000:  # 10秒
+                logger.warning(f"高延迟: {raw_latency_ms}ms (可能网络有问题)")
                 
-                await asyncio.sleep(1)
+            return raw_latency_ms  # ✅ 返回原始值
                 
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"❌ Performance monitor error: {e}")
-                await asyncio.sleep(5)
+        except (ValueError, TypeError) as e:
+            logger.debug(f"无法计算延迟: {e}")
+            return None
+        
+    def _update_latency_stats(self, message_type: str, latency_ms: float, timestamp_ms: int):
+        """更新延迟统计"""
+        stats_key = message_type
+        
+        if stats_key not in self.monitor.realtime_stats:
+            return
+            
+        stats = self.monitor.realtime_stats[stats_key]
+        all_stats = self.monitor.realtime_stats["all"]
+        
+        # 更新计数
+        stats["count"] += 1
+        all_stats["count"] += 1
+        
+        # 更新时间
+        now = datetime.now(timezone.utc)
+        stats["last_time"] = now
+        all_stats["last_time"] = now
+        
+        # 更新EWMA延迟
+        alpha = 0.9
+        stats["latency_ewma"] = stats["latency_ewma"] * alpha + latency_ms * (1 - alpha)
+        all_stats["latency_ewma"] = all_stats["latency_ewma"] * alpha + latency_ms * (1 - alpha)
+        
+        # 更新极值
+        stats["latency_min"] = min(stats["latency_min"], latency_ms)
+        stats["latency_max"] = max(stats["latency_max"], latency_ms)
+        all_stats["latency_min"] = min(all_stats["latency_min"], latency_ms)
+        all_stats["latency_max"] = max(all_stats["latency_max"], latency_ms)
+        
+        # 记录到历史窗口
+        self.monitor.latency_history[stats_key].append(latency_ms)
+        self.monitor.latency_history["all"].append(latency_ms)
+        
+        # 定期计算百分位
+        if stats["count"] % 100 == 0:
+            self._calculate_percentiles(stats_key)
+            self._calculate_throughput(stats_key)
+        
+    def _calculate_percentiles(self, stats_key: str):
+        """计算延迟百分位"""
+        history = self.monitor.latency_history[stats_key]
+        if len(history) < 10:
+            return
+            
+        sorted_latencies = sorted(history)
+        n = len(sorted_latencies)
+        
+        stats = self.monitor.realtime_stats[stats_key]
+        
+        # P50（中位数）
+        stats["latency_p50"] = sorted_latencies[n // 2]
+        
+        # P95
+        idx_95 = int(n * 0.95)
+        stats["latency_p95"] = sorted_latencies[min(idx_95, n-1)]
+        
+        # P99
+        idx_99 = int(n * 0.99)
+        stats["latency_p99"] = sorted_latencies[min(idx_99, n-1)]
+        
+    def _calculate_throughput(self, stats_key: str):
+        """计算吞吐量"""
+        stats = self.monitor.realtime_stats[stats_key]
+        if stats["last_update"]:
+            time_diff = (datetime.now(timezone.utc) - stats["last_update"]).total_seconds()
+            if time_diff > 0:
+                # 基于最近100条消息计算吞吐量
+                recent_count = min(100, stats["count"])
+                stats["throughput_1s"] = recent_count / time_diff if time_diff < 100 else 0
+                stats["throughput_1m"] = recent_count / (time_diff / 60) if time_diff > 0 else 0
+        stats["last_update"] = datetime.now(timezone.utc)
         
     def get_connection_status(self) -> Dict:
         """获取所有连接的详细状态"""
@@ -1124,14 +1295,12 @@ class PolymarketAdapter(BaseAdapter):
             **base_status,
             "performance": performance_summary,
             "orderbook_snapshots_count": len(self.orderbook_snapshots),
-            "pending_updates_count": sum(len(updates) for updates in self.pending_updates.values()),
             "connection_details": connection_details
         }
     
     '''
         Market接口
     '''
-    
     def _cache_markets(self, markets: List[Dict]):
         """缓存市场核心信息为 CachedMarket 对象"""
         current_time = time.time()

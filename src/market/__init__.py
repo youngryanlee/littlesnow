@@ -3,7 +3,7 @@ Market Data Module
 A comprehensive market data handling system with multi-exchange support.
 """
 
-from .core import MarketData, OrderBook, Trade, ExchangeType, MarketType
+from .core import MarketData, OrderBook, TradePrice, PriceChange, ExchangeType, MarketType
 from .adapter import BaseMarketAdapter, BinanceAdapter, BybitAdapter, DeribitAdapter, PolymarketAdapter
 from .service import WebSocketManager, WebSocketConnector, MarketRouter, ExternalOracle, DataNormalizer
 from .model import MarketSnapshot
@@ -13,7 +13,8 @@ __all__ = [
     'BaseMarketAdapter',
     'MarketData',
     'OrderBook', 
-    'Trade',
+    'TradePrice',
+    'PriceChange'
     'ExchangeType',
     'MarketType',
     'BinanceAdapter',

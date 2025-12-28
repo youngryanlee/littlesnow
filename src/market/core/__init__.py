@@ -1,9 +1,10 @@
-from .data_models import MarketData, OrderBook, Trade, ExchangeType, MarketType
+from .data_models import MarketData, OrderBook, TradePrice, PriceChange, ExchangeType, MarketType
 
 __all__ = [
     'MarketData', 
     'OrderBook',
-    'Trade',
+    'TradePrice',
+    'PriceChange',
     'ExchangeType',
     'MarketType'
 ]
