@@ -49,15 +49,21 @@ class OrderBook:
     def get_latency(self):
         return self.receive_timestamp - self.server_timestamp
 
+'''
+交易所和Polymarket通用数据结构：
+    交易所对应trade消息
+    Polymarket对应last_trade_price消息
+'''
 @dataclass(frozen=True)
-class TradePrice:
-    asset_id: str
+class TradeTick:
+    symbol: str # also means asset_id in Polymarket
     trade_id: str
     price: Decimal
     size: Decimal
     side: Literal["BUY", "SELL"]
     server_timestamp: int
     receive_timestamp: int
+    exchange: ExchangeType
 
 @dataclass(frozen=True)
 class PriceChange:
@@ -297,7 +303,7 @@ class MarketData:
     
     # 可选字段
     orderbook: Optional[OrderBook] = None
-    last_trade: Optional[TradePrice] = None
+    last_trade: Optional[TradeTick] = None
     last_price: Optional[Decimal] = None
     volume_24h: Optional[Decimal] = None
     price_change_24h: Optional[Decimal] = None

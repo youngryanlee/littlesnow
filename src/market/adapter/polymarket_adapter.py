@@ -4,7 +4,7 @@ import time
 from decimal import Decimal
 from datetime import datetime, timezone
 from collections import deque, defaultdict
-from typing import Optional, List, Dict, Union, Deque
+from typing import Optional, List, Dict, Deque
 import aiohttp
 from enum import Enum
 from dataclasses import dataclass
@@ -13,7 +13,7 @@ from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector
-from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, TradePrice, PriceChange, MakerOrder, Trade
+from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, TradeTick, PriceChange, MakerOrder, Trade
 
 logger = get_logger()
 
@@ -85,7 +85,7 @@ class PolymarketAdapter(BaseAdapter):
 
         # 市场数据状态
         self.orderbook_snapshots: Dict[str, OrderBook] = {} # asset_id -> 最新订单薄，对用BOOK消息
-        self.last_trade_prices: Dict[str, TradePrice] = {}    # asset_id -> 最后成交信息，对应last_trade_price消息
+        self.last_trade_prices: Dict[str, TradeTick] = {}    # asset_id -> 最后成交信息，对应last_trade_price消息
         self.price_changes: Dict[str, Deque[PriceChange]] = {} # asset_id -> 价格变化信息信息，对应price_change消息
         self.trade_history: Dict[str, List[Trade]] = {}  # asset_id -> 交易历史列表se
 
@@ -743,7 +743,8 @@ class PolymarketAdapter(BaseAdapter):
             
             # 生成市场数据
             logger.info(f"To create market data for {asset_id}")
-            market_data = self._create_market_data(asset_id)
+            orderbook = self.orderbook_snapshots.get(asset_id)
+            market_data = self._create_market_data(symbol=asset_id, exchange=ExchangeType.POLYMARKET, orderbook=orderbook)
             if market_data:
                 logger.info(f"Callback for {market_data}")
                 self._notify_callbacks(market_data)
@@ -800,21 +801,21 @@ class PolymarketAdapter(BaseAdapter):
         try:
             # 注意：这里data来自`last_trade_price`消息，字段是`asset_id`和`market`
             asset_id = data['asset_id']  # 关键：使用asset_id作为key
-            condition_id = data['market']
             price = Decimal(data['price'])
             size = Decimal(data['size'])
             side = data['side']  # 注意：消息中是 'BUY'/'SELL'
             server_timestamp = int(data['timestamp'])
             
             # 1. 创建Trade对象（如果需要）
-            trade = TradePrice(
+            trade = TradeTick(
                 trade_id=f"{asset_id}_{server_timestamp}",
-                asset_id=asset_id,
+                symbol=asset_id,
                 price=price,
                 size=size,
                 side = side,
                 server_timestamp = server_timestamp,
-                receive_timestamp = receive_timestamp
+                receive_timestamp = receive_timestamp,
+                exchange=ExchangeType.POLYMARKET
             )
             
             self.last_trade_prices[asset_id] = trade
@@ -822,7 +823,8 @@ class PolymarketAdapter(BaseAdapter):
             # 2. 生成市场数据，触发回调
             # 你需要确保_create_market_data能通过asset_id找到对应订单簿，并填入last_price
             market_data = self._create_market_data(
-                asset_id=asset_id,
+                symbol=asset_id,
+                exchange=ExchangeType.POLYMARKET,
                 last_price=price,
                 last_trade=trade
             )
@@ -887,7 +889,8 @@ class PolymarketAdapter(BaseAdapter):
 
                 # ④ 生成 MarketData（不动 orderbook）
                 market_data = self._create_market_data(
-                    asset_id=asset_id,
+                    symbol=asset_id,
+                    exchange=ExchangeType.POLYMARKET,
                     last_price=price,
                     external_timestamp=server_timestamp
                 )
@@ -1007,20 +1010,22 @@ class PolymarketAdapter(BaseAdapter):
                 self.trade_history[asset_id] = self.trade_history[asset_id][-1000:]
             
             # 更新最后成交价
-            trade_price_obj = TradePrice(
+            trade_price_obj = TradeTick(
                 trade_id=trade_id,
-                asset_id=asset_id,
+                symbol=asset_id,
                 price=price,
                 size=size,
                 side=side.lower(),  # 转换为小写以保持一致性
                 server_timestamp=datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc),
-                receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000)
+                receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                exchange=ExchangeType.POLYMARKET
             )
             self.last_trade_prices[asset_id] = trade_price_obj
             
             # 生成市场数据
             market_data = self._create_market_data(
-                asset_id=asset_id,
+                symbol=asset_id,
+                exchange=ExchangeType.POLYMARKET,
                 last_price=price,
                 last_trade=trade_price_obj,
                 external_timestamp=datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
@@ -1045,64 +1050,7 @@ class PolymarketAdapter(BaseAdapter):
         """处理错误消息"""
         error_msg = data.get('message', 'Unknown error')
         logger.error(f"❌ WebSocket error: {error_msg}")
-        
-    def _create_market_data(
-        self,
-        asset_id: str,
-        # 可选的新参数，提供默认值以保持向后兼容
-        last_price: Optional[Union[str, Decimal]] = None,
-        last_trade: Optional[TradePrice] = None,
-        external_timestamp: Optional[datetime] = None
-    ) -> Optional[MarketData]:
-        """
-        创建市场数据对象。
-        若无快照，则返回None。
-        传入last_price等新参数:
-            即使没有订单簿快照，也可利用新参数创建基础MarketData。
-        """
-        try:
-            # 1. 确定时间戳：优先使用外部传入的，否则用当前时间
-            timestamp = external_timestamp or datetime.now(timezone.utc)
-            
-            # 2. 获取订单簿（可能为None）
-            orderbook = self.orderbook_snapshots.get(asset_id)
-            
-            # 3. 🎯 核心逻辑：判断调用模式
-            # 情况A：传统调用，无新参数 -> 严格要求必须有订单簿
-            if last_price is None and last_trade is None:
-                if not orderbook:
-                    # 维持原有行为：无订单簿则返回None
-                    return None
-                # 有订单簿，创建传统订单簿数据
-                return MarketData(
-                    symbol=asset_id,
-                    exchange=ExchangeType.POLYMARKET,
-                    market_type=MarketType.PREDICTION,
-                    timestamp=timestamp,
-                    orderbook=orderbook,
-                    # last_price 和 last_trade 默认为 None
-                )
-            
-            # 情况B：增强调用，传入了新参数 -> 允许创建不依赖订单簿的数据
-            # 处理价格
-            final_last_price = None
-            if last_price is not None:
-                final_last_price = Decimal(str(last_price))
-            
-            # 创建MarketData
-            return MarketData(
-                symbol=asset_id,
-                exchange=ExchangeType.POLYMARKET,
-                market_type=MarketType.PREDICTION,
-                timestamp=timestamp,
-                orderbook=orderbook,           # 有则附带，无则None
-                last_price=final_last_price,   # 来自新参数
-                last_trade=last_trade          # 来自新参数
-            )
-            
-        except Exception as e:
-            logger.error(f"❌ Error creating market data: {e}")
-            return None
+
         
     '''
         错误处理接口

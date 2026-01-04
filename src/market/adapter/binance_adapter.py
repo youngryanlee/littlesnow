@@ -2,14 +2,15 @@
 import asyncio
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Deque, Optional, Any
+from collections import defaultdict, deque
 import json
 
 from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector
-from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType
+from ..core.data_models import MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, TradeTick
 
 logger = get_logger()
 
@@ -85,6 +86,10 @@ class BinanceAdapter(BaseAdapter):
         self.pending_updates: Dict[str, List[dict]] = {}      # 严格按序存放暂无法处理的实时增量更新的队列
         self.snapshot_initialized: Dict[str, bool] = {}       # 布尔锁。False时所有更新进“待办清单”；True后更新可直接应用
 
+        # 交易数据管理
+        self.last_trade: Dict[str, TradeTick] = {}
+        self.recent_trades: Dict[str, Deque[TradeTick]] = defaultdict(lambda: deque(maxlen=100))
+
         # WebSocket connector (假设已实现)
         self.connector = WebSocketConnector(
             url=self.ws_url,
@@ -97,8 +102,6 @@ class BinanceAdapter(BaseAdapter):
 
         # 用以存放 subscribe 后正在进行 snapshot 初始化的任务，避免重复 init
         self._init_tasks: Dict[str, asyncio.Task] = {}
-        # 回调执行线程池（用于同步回调）
-        self._callback_executor = None  # lazy init
 
     # -----------------------
     # helper: buffer management
@@ -115,6 +118,11 @@ class BinanceAdapter(BaseAdapter):
                 server_timestamp=0,  # 明确表示“未知”
                 receive_timestamp=0,  # 明确表示“未知”
                 symbol=symbol)  
+        if symbol not in self.last_trade:
+            self.last_trade[symbol] = None
+        if symbol not in self.recent_trades:
+            # 默认保存最近100条交易记录
+            self.recent_trades[symbol] = deque(maxlen=100)    
             
     def _reset_symbol_state(self, symbol: str):
         """清理指定symbol的所有状态"""
@@ -322,17 +330,18 @@ class BinanceAdapter(BaseAdapter):
 
             # 发布 MarketData 给下游（非阻塞）
             if notify: # 只有当 notify=True 时才触发回调
-                market_data = MarketData(
+                # 创建市场数据并触发回调
+                market_data = self._create_market_data(
                     symbol=symbol,
                     exchange=ExchangeType.BINANCE,
                     market_type=MarketType.SPOT,
-                    timestamp=datetime.now(timezone.utc),
+                    external_timestamp=receive_ts,
                     orderbook=updated
                 )
-
-                logger.info("Notify callback for %s", symbol)
-                # dispatch callbacks asynchronously
-                self._notify_callbacks(market_data)
+                
+                if market_data:
+                    logger.info(f"Callback for {market_data}")
+                    self._notify_callbacks(market_data)
 
         except Exception as e:
             logger.exception("Error applying orderbook update for %s: %s", symbol, e)
@@ -560,52 +569,108 @@ class BinanceAdapter(BaseAdapter):
                 
             logger.warning(f"pending_updates for {symbol} reached resync threshold ({len(self.pending_updates[symbol])}), scheduling snapshot re-init")
             task = asyncio.create_task(self._retry_snapshot_initialization(symbol))
-            self._init_tasks[symbol] = task         
+            self._init_tasks[symbol] = task     
+
 
     # -----------------------
-    # callbacks dispatch (非阻塞)
+    # trade
     # -----------------------
-    def _ensure_callback_executor(self):
-        if self._callback_executor is None:
-            # lazy init a thread pool for sync callbacks
-            loop = asyncio.get_event_loop()
-            from concurrent.futures import ThreadPoolExecutor
-            self._callback_executor = ThreadPoolExecutor(max_workers=4)
-
-    def _notify_callbacks(self, market_data: MarketData):
+    def _handle_trade(self, data: dict) -> None:
         """
-        将回调执行异步化：
-         - 如果 callback 是协程函数，直接 create_task(awaitable)
-         - 否则交给线程池执行以免阻塞事件循环
+        处理交易消息
+        Binance trade 消息格式:
+        {
+            "e": "trade",        // 事件类型
+            "E": 123456789,      // 事件时间 (服务器时间)
+            "s": "BTCUSDT",      // 交易对
+            "t": 12345,          // 交易ID
+            "p": "0.001",        // 价格
+            "q": "100",          // 数量
+            "b": 88,             // 买方订单ID
+            "a": 50,             // 卖方订单ID
+            "T": 123456785,      // 交易时间戳
+            "m": true,           // 买方是否是做市方？如果是true，则买方是市价单，卖方是挂单方，即主动卖出
+            "M": true            // 忽略
+        }
+        
+        注意：m字段表示买方是否是做市方
+        - m=True: 买方是市价单，卖方是挂单方 -> 主动卖出 (SELL)
+        - m=False: 买方是挂单方，卖方是市价单 -> 主动买入 (BUY)
         """
-        if not self.callbacks:
-            return
-
-        loop = asyncio.get_event_loop()
-        self._ensure_callback_executor()
-
-        for cb in list(self.callbacks):
-            if asyncio.iscoroutinefunction(cb):
-                try:
-                    loop.create_task(cb(market_data))
-                except Exception:
-                    logger.exception("Failed scheduling coroutine callback")
-            else:
-                # run sync callback in threadpool to avoid blocking
-                try:
-                    loop.run_in_executor(self._callback_executor, cb, market_data)
-                except Exception:
-                    logger.exception("Failed scheduling sync callback")
-
-    # -----------------------
-    # trade / misc
-    # -----------------------
-    def _handle_trade(self, data: dict):
-        # trade 消息目前可记录或转发给下游（这里保留空实现）
         try:
-            logger.debug("Trade message (binance): %s", data if isinstance(data, dict) else str(data)[:200])
-        except Exception:
-            logger.exception("Error processing trade message")
+            # 从data中提取交易数据
+            if 'stream' in data:
+                # stream格式: btcusdt@trade
+                stream_data = data['data']
+                symbol = stream_data.get('s', '').upper()
+                trade_data = stream_data
+            else:
+                symbol = data.get('s', '').upper()
+                trade_data = data
+            
+            if not symbol:
+                logger.warning("Trade message missing symbol: %s", data)
+                return
+            
+            # 获取价格和数量
+            price_str = trade_data.get('p')
+            quantity_str = trade_data.get('q')
+            
+            if not price_str or not quantity_str:
+                logger.warning("Trade message missing price or quantity: %s", trade_data)
+                return
+            
+            # 解析交易方向
+            # m=True: 买方是市价单 -> 主动卖出 (SELL)
+            # m=False: 买方是挂单方 -> 主动买入 (BUY)
+            is_market_maker = trade_data.get('m', False)
+            side = "SELL" if is_market_maker else "BUY"
+            
+            # 获取时间戳
+            # 优先使用交易时间戳(T)，如果没有则使用事件时间戳(E)
+            trade_time = trade_data.get('T', trade_data.get('E'))
+            if not trade_time:
+                logger.warning("Trade message missing timestamp: %s", trade_data)
+                return
+            
+            # 创建TradeTick对象
+            trade_tick = TradeTick(
+                symbol=symbol,
+                trade_id=str(trade_data.get('t', '')),
+                price=Decimal(price_str),
+                size=Decimal(quantity_str),
+                side=side,
+                server_timestamp=int(trade_time),
+                receive_timestamp=int(datetime.now(timezone.utc).timestamp() * 1000),
+                exchange=ExchangeType.BINANCE
+            )
+            
+            # 更新last_trade
+            self.last_trade[symbol] = trade_tick
+            
+            # 添加到recent_trades
+            if symbol in self.recent_trades:
+                self.recent_trades[symbol].append(trade_tick)
+            
+            # 创建市场数据并触发回调
+            market_data = self._create_market_data(
+                symbol=symbol,
+                exchange=ExchangeType.BINANCE,
+                last_trade=trade_tick,
+                external_timestamp=datetime.fromtimestamp(trade_time/1000, timezone.utc)
+            )
+            
+            if market_data:
+                logger.info(f"Callback for {market_data}")
+                self._notify_callbacks(market_data)
+            
+            
+            logger.debug("Processed trade for %s: %s %s @ %s", 
+                        symbol, side, quantity_str, price_str)
+            
+        except Exception as e:
+            logger.exception("Error processing trade message: %s", e) 
+
 
     def _handle_connection_error(self, error: Exception):
         logger.error("Binance WebSocket connection error: %s", error)
@@ -662,15 +727,16 @@ class BinanceAdapter(BaseAdapter):
         # 所有重试都失败，清理任务引用
         self._init_tasks.pop(symbol, None)
         return False
+    
 
-
-    # -----------------------
-    # normalize / status
-    # -----------------------
     def normalize_data(self, raw_data: dict) -> Optional[MarketData]:
         """保留用于兼容接口的占位方法"""
         return None
 
+
+    # -----------------------
+    # 监控方法
+    # -----------------------
     def get_connection_status(self) -> dict:
         base_status = super().get_connection_status()
         connector_info = {}
@@ -714,3 +780,63 @@ class BinanceAdapter(BaseAdapter):
     def is_symbol_ready(self, symbol: str) -> bool:
         """检查symbol是否已成功初始化"""
         return self.snapshot_initialized.get(symbol.upper(), False)
+    
+    def get_last_trade(self, symbol: str) -> Optional[TradeTick]:
+        """获取指定交易对的最新交易"""
+        return self.last_trade.get(symbol.upper())
+    
+    def get_recent_trades(self, symbol: str, limit: int = 50) -> List[TradeTick]:
+        """获取指定交易对的最近交易记录"""
+        symbol = symbol.upper()
+        if symbol not in self.recent_trades:
+            return []
+        
+        # 返回最近的limit条交易记录
+        trades = list(self.recent_trades[symbol])
+        return trades[-limit:] if len(trades) > limit else trades
+    
+    def get_trade_statistics(self, symbol: str, window_seconds: int = 300) -> Dict[str, Any]:
+        """
+        获取交易统计信息（最近window_seconds秒内的统计）
+        """
+        symbol = symbol.upper()
+        if symbol not in self.recent_trades:
+            return {}
+        
+        now_timestamp = int(datetime.now(timezone.utc).timestamp() * 1000)
+        window_millis = window_seconds * 1000
+        
+        # 过滤窗口期内的交易
+        recent_trades = [
+            trade for trade in self.recent_trades[symbol]
+            if now_timestamp - trade.server_timestamp <= window_millis
+        ]
+        
+        if not recent_trades:
+            return {}
+        
+        # 计算统计信息
+        buy_trades = [t for t in recent_trades if t.side == "BUY"]
+        sell_trades = [t for t in recent_trades if t.side == "SELL"]
+        
+        total_volume = sum(float(t.size) for t in recent_trades)
+        buy_volume = sum(float(t.size) for t in buy_trades)
+        sell_volume = sum(float(t.size) for t in sell_trades)
+        
+        prices = [float(t.price) for t in recent_trades]
+        
+        return {
+            "symbol": symbol,
+            "window_seconds": window_seconds,
+            "trade_count": len(recent_trades),
+            "buy_count": len(buy_trades),
+            "sell_count": len(sell_trades),
+            "total_volume": total_volume,
+            "buy_volume": buy_volume,
+            "sell_volume": sell_volume,
+            "volume_ratio": float(buy_volume / sell_volume) if sell_volume > 0 else float('inf'),
+            "avg_price": sum(prices) / len(prices) if prices else 0,
+            "min_price": min(prices) if prices else 0,
+            "max_price": max(prices) if prices else 0,
+            "last_price": float(recent_trades[-1].price) if recent_trades else 0,
+        }

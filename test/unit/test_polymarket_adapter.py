@@ -961,7 +961,7 @@ class TestPolymarketWebSocketAdapter:
         adapter.orderbook_snapshots[market_id] = mock_orderbook
         
         # 测试创建市场数据
-        market_data = adapter._create_market_data(market_id)
+        market_data = adapter._create_market_data(symbol=market_id, exchange=ExchangeType.POLYMARKET, orderbook=mock_orderbook)
         
         # 验证结果
         assert market_data is not None
@@ -972,7 +972,7 @@ class TestPolymarketWebSocketAdapter:
     
     def test_create_market_data_nonexistent(self, adapter):
         """测试为不存在的市场创建市场数据"""
-        market_data = adapter._create_market_data("nonexistent_market")
+        market_data = adapter._create_market_data(symbol="nonexistent_market", exchange=ExchangeType.POLYMARKET)
         
         assert market_data is None
     
