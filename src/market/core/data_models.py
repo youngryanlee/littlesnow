@@ -35,6 +35,9 @@ class OrderBook:
     server_timestamp: int
     receive_timestamp: int
     symbol: str
+
+    # Binance / Coinbase / OKX 等 CEX 使用
+    last_update_id: Optional[int] = None
     
     def get_spread(self) -> Decimal:
         if not self.bids or not self.asks:
@@ -48,6 +51,9 @@ class OrderBook:
     
     def get_latency(self):
         return self.receive_timestamp - self.server_timestamp
+    
+    def is_update_id_valid(self) -> bool:
+        return self.last_update_id is not None and self.last_update_id > 0
 
 '''
 交易所和Polymarket通用数据结构：

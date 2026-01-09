@@ -2,9 +2,10 @@
 import asyncio
 from decimal import Decimal
 from datetime import datetime, timezone
-from typing import List, Dict, Deque, Optional, Any
+from typing import List, Dict, Deque, Optional, Any, Tuple
 from collections import defaultdict, deque
-import json
+import time
+import traceback
 
 from logger.logger import get_logger
 from .base_adapter import BaseAdapter
@@ -73,7 +74,7 @@ class BinanceAdapter(BaseAdapter):
     # 如果 pending 超过这个数量，触发重拉 snapshot 的阈值（可以根据场景调整）
     PENDING_RESYNC_THRESHOLD = 5000
 
-    def __init__(self):
+    def __init__(self, verification_enabled: bool = True, verification_interval: int = 1):
         super().__init__("binance", ExchangeType.BINANCE)
         self.ws_url = "wss://stream.binance.com:9443/ws"
         self.ws_url_1 = "wss://stream.binance.com:443"
@@ -89,6 +90,18 @@ class BinanceAdapter(BaseAdapter):
         # 交易数据管理
         self.last_trade: Dict[str, TradeTick] = {}
         self.recent_trades: Dict[str, Deque[TradeTick]] = defaultdict(lambda: deque(maxlen=100))
+
+        # 验证控制
+        self._verification_enabled = verification_enabled
+        self._verification_interval = verification_interval
+        self._verification_tasks: Dict[str, asyncio.Task] = {}
+        self._verification_stats: Dict[str, Dict] = defaultdict(lambda: {
+            'total_verifications': 0,
+            'passed_verifications': 0,
+            'failed_verifications': 0,
+            'last_verification_time': None,
+            'last_verification_result': None,
+        })
 
         # WebSocket connector (假设已实现)
         self.connector = WebSocketConnector(
@@ -158,6 +171,7 @@ class BinanceAdapter(BaseAdapter):
             self.snapshot_initialized[symbol] = False
             return False
 
+        logger.info("Get snapshot for %s", symbol)
         # parse snapshot
         try:
             last_update_id = int(snapshot['lastUpdateId'])
@@ -180,7 +194,8 @@ class BinanceAdapter(BaseAdapter):
             asks=asks,
             server_timestamp=last_update_id,   # 使用 last_update_id 作为 server_timestamp 的占位符
             receive_timestamp=receive_ts,      # 本地接收时间
-            symbol=symbol
+            symbol=symbol,
+            last_update_id=last_update_id
         )
 
         # store snapshot
@@ -205,7 +220,7 @@ class BinanceAdapter(BaseAdapter):
         for upd in filtered:
             U = upd.get('U')
             u = upd.get('u')
-            logger.info("applying {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
+            logger.info(f"applying {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
             if U is None or u is None:
                 # 如果字段缺失，跳过；但保留在 buffer 里以供后续判断或直接丢弃
                 continue
@@ -216,7 +231,7 @@ class BinanceAdapter(BaseAdapter):
                     self.last_update_ids[symbol] = int(u)
                     expected = int(u) + 1
                     applied_any = True
-                    logger.info("applied {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
+                    logger.info(f"applied {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
                 except Exception:
                     logger.exception("Failed to apply chained update during init for %s", symbol)
                 break
@@ -311,9 +326,14 @@ class BinanceAdapter(BaseAdapter):
             new_asks = new_asks[:20]
 
             # 确定 server_timestamp
-            server_ts = update_data.get('E')  # 优先使用 WebSocket 事件时间
+            server_ts = update_data.get('E')
             if server_ts is None:
-                server_ts = update_data.get('u', int(datetime.now(timezone.utc).timestamp() * 1000))
+                logger.warning(f"No 'E' field for {symbol} in {update_data}")
+
+            # 确定 last_update_id
+            last_update_id = update_data.get('u')
+            if last_update_id is None:
+                logger.warning(f"No 'u' field for {symbol} in {update_data}")
 
             receive_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
 
@@ -322,11 +342,12 @@ class BinanceAdapter(BaseAdapter):
                 asks=new_asks,
                 server_timestamp=int(server_ts),   # 来自服务器的事件时间
                 receive_timestamp=receive_ts,      # 本地接收时间
-                symbol=symbol
+                symbol=symbol,
+                last_update_id=last_update_id  # 使用更新消息中的u字段
             )    
 
             self.orderbook_snapshots[symbol] = updated
-            logger.info("Applied orderbook update for %s: bids=%d asks=%d", symbol, len(new_bids), len(new_asks))
+            logger.debug("Applied orderbook update for %s: bids=%d asks=%d", symbol, len(new_bids), len(new_asks))
 
             # 发布 MarketData 给下游（非阻塞）
             if notify: # 只有当 notify=True 时才触发回调
@@ -340,7 +361,7 @@ class BinanceAdapter(BaseAdapter):
                 )
                 
                 if market_data:
-                    logger.info(f"Callback for {market_data}")
+                    logger.debug(f"Callback for {market_data}")
                     self._notify_callbacks(market_data)
 
         except Exception as e:
@@ -403,7 +424,7 @@ class BinanceAdapter(BaseAdapter):
                 continue
             t = asyncio.create_task(self._init_snapshot_with_buffering(symbol))
             self._init_tasks[symbol] = t
-            tasks.append((symbol, task))
+            tasks.append((symbol, t))
         
         if tasks:
             # 使用gather并行等待，但捕获每个任务的结果
@@ -420,6 +441,13 @@ class BinanceAdapter(BaseAdapter):
                 elif result:
                     logger.info(f"{symbol}: Initialization successful")
                     success_symbols.append(symbol)
+
+                    try:
+                        if self._verification_enabled:
+                            # 启动验证任务，每秒验证一次（可根据需要调整间隔）
+                            self._start_verification_task(symbol, interval_seconds=1)
+                    except Exception as e:
+                        logger.error(f"Failed to start verification for {symbol}: {e}Error messageClick to retry")
                 else:
                     logger.error(f"{symbol}: Initialization failed")
                     fail_symbols.append(symbol)
@@ -475,6 +503,12 @@ class BinanceAdapter(BaseAdapter):
                     self._handle_trade(raw_data)
                 else:
                     logger.debug("Unhandled event type: %s", event_type)
+            elif 'result' in raw_data:
+                event_type = raw_data['result']  
+                if event_type is None:
+                    pass
+                else:
+                    logger.info("Unrecognized message shape from Binance WS: %s", raw_data)
             else:
                 logger.info("Unrecognized message shape from Binance WS: %s", raw_data)
         except Exception as e:
@@ -661,7 +695,7 @@ class BinanceAdapter(BaseAdapter):
             )
             
             if market_data:
-                logger.info(f"Callback for {market_data}")
+                logger.debug(f"Callback for {market_data}")
                 self._notify_callbacks(market_data)
             
             
@@ -776,6 +810,411 @@ class BinanceAdapter(BaseAdapter):
                 return "initializing"
         
         return "pending"  # 已订阅但未开始初始化
+    
+    async def verify_orderbook_snapshot(self, symbol: str, tolerance: float = 0.001) -> Tuple[bool, Dict]:
+        """
+        精准验证订单簿数据正确性
+        
+        验证策略：
+        1. 检查更新ID序列的连续性
+        2. 验证本地数据包含快照更新ID之后的所有更新
+        3. 使用REST API的深度数据进行交叉验证
+        
+        Args:
+            symbol: 交易对
+            tolerance: 允许的数量误差百分比（默认0.1%）
+            
+        Returns:
+            (是否一致, 差异详情)
+        """
+        symbol = symbol.upper()
+        
+        try:
+            # 1. 获取REST API快照和深度
+            async with RESTConnector(base_url=self.rest_base_url, timeout=10, name=f"binance_verify_{symbol}") as rest:
+                snapshot = await rest.get_json(f"/depth?symbol={symbol}&limit=100")
+                # 同时获取最新成交作为参考
+                trades = await rest.get_json(f"/trades?symbol={symbol}&limit=1")
+            
+            snapshot_last_update_id = int(snapshot['lastUpdateId'])
+            local_last_update_id = self.last_update_ids.get(symbol, 0)
+            logger.info(f" 订单簿验证: {symbol} (本地更新ID: {local_last_update_id}, 快照更新ID: {snapshot_last_update_id})")
+            
+            # 2. 获取本地订单簿
+            local_ob = self.orderbook_snapshots.get(symbol)
+            if not local_ob:
+                # 更新统计
+                self._update_verification_stats(symbol, False, {'reason': 'local_orderbook_missing'})
+                return False, {'reason': 'local_orderbook_missing'}
+            
+            # 3. 检查更新ID的正确性（核心验证）
+            # 本地更新ID应该 >= 快照更新ID（因为我们处理了快照之后的更新）
+            update_id_info = {
+                'snapshot_update_id': snapshot_last_update_id,
+                'local_update_id': local_last_update_id,
+                'update_id_diff': local_last_update_id - snapshot_last_update_id
+            }
+            
+            # 关键验证点1：本地应该包含快照之后的所有更新
+            if local_last_update_id < snapshot_last_update_id:
+                # 本地缺少快照之后的更新，这是严重问题
+                return False, {
+                    'reason': 'missing_updates_after_snapshot',
+                    'message': f'本地更新ID({local_last_update_id})小于快照更新ID({snapshot_last_update_id})，缺少{snapshot_last_update_id - local_last_update_id}个更新',
+                    **update_id_info
+                }
+            
+            # 4. 深度交叉验证（使用更精确的方法）
+            snapshot_bids = {Decimal(b[0]): Decimal(b[1]) for b in snapshot.get('bids', [])}
+            snapshot_asks = {Decimal(a[0]): Decimal(a[1]) for a in snapshot.get('asks', [])}
+            
+            # 5. 获取本地订单簿的前N档（深度100）
+            local_bids = {}
+            local_asks = {}
+            
+            for bid in local_ob.bids[:100]:
+                local_bids[bid.price] = bid.quantity
+            for ask in local_ob.asks[:100]:
+                local_asks[ask.price] = ask.quantity
+
+            logger.info(f" 订单簿验证: {symbol} (本地bids: {local_bids}, 快照bids: {snapshot_bids})")    
+            logger.info(f" 订单簿验证: {symbol} (本地asks: {local_asks}, 快照asks: {snapshot_asks})")    
+            
+            # 检查差异
+            differences = []
+            warnings = []
+            critical_issues = []
+            
+            # 关键验证点2： 验证买卖盘交叉（基本规则）
+            if local_ob.bids and local_ob.asks:
+                best_bid = local_ob.bids[0].price
+                best_ask = local_ob.asks[0].price
+                if best_bid >= best_ask:
+                    critical_issues.append(f"买卖盘交叉: 最佳买价 {best_bid} >= 最佳卖价 {best_ask}")
+            
+            # 关键验证点3： 验证价格单调性
+            for i in range(len(local_ob.bids) - 1):
+                if local_ob.bids[i].price <= local_ob.bids[i + 1].price:
+                    critical_issues.append(f"买盘价格非单调递减: {local_ob.bids[i].price} <= {local_ob.bids[i + 1].price}")
+                    break
+            
+            for i in range(len(local_ob.asks) - 1):
+                if local_ob.asks[i].price >= local_ob.asks[i + 1].price:
+                    critical_issues.append(f"卖盘价格非单调递增: {local_ob.asks[i].price} >= {local_ob.asks[i + 1].price}")
+                    break
+            
+            # 6. 与快照的精确比较（使用Binance的增量更新逻辑）
+            # Binance的更新机制保证：如果我们的更新ID >= 快照更新ID，并且正确处理了所有更新，
+            # 那么本地订单簿应该是正确的。但我们可以验证一些关键点：
+            
+            # 检查pending buffer状态
+            pending_updates = len(self.pending_updates.get(symbol, []))
+            
+            # 关键验证点4：如果pending buffer过长，说明数据处理有问题
+            if pending_updates > self.PENDING_RESYNC_THRESHOLD:
+                critical_issues.append(f"pending buffer过长: {pending_updates}个更新等待处理")
+            
+            # 关键验证点5：验证数据的时间戳合理性
+            if hasattr(local_ob, 'server_timestamp'):
+                current_time = int(time.time() * 1000)
+                time_diff = current_time - local_ob.server_timestamp
+                
+                if time_diff > 60000:  # 超过1分钟
+                    critical_issues.append(f"数据延迟过大: {time_diff}ms")
+                elif time_diff > 10000:  # 超过10秒
+                    warnings.append(f"数据有一定延迟: {time_diff}ms")  
+
+            # 关键验证点6：策略关键一致性（price only）
+            # ⚠️ 只有在本地与快照几乎同步时才检查最优价一致性
+            PRICE_CHECK_MAX_UPDATE_DIFF = 5  # <= 5 个 update 认为是“同步”
+            update_id_diff = update_id_info['update_id_diff']
+
+            price_mismatch = False
+            if abs(update_id_diff) <= PRICE_CHECK_MAX_UPDATE_DIFF:
+                if snapshot_bids and local_ob.bids:
+                    if local_ob.bids[0].price != max(snapshot_bids.keys()):
+                        price_mismatch = True
+
+                if snapshot_asks and local_ob.asks:
+                    if local_ob.asks[0].price != min(snapshot_asks.keys()):
+                        price_mismatch = True
+
+                if price_mismatch:
+                    critical_issues.append("最优价位与快照不一致（同步状态下）")
+            else:
+                logger.info(
+                    f"跳过最优价一致性校验：local 比 snapshot 新 {update_id_diff} 个更新"
+                )    
+
+            # ====== 下面验证辅助信息 ======
+            # 7. 数量一致性检查（只检查存在的数据）
+            # 对于快照中的每个价格档位，如果本地也有，检查数量是否匹配
+            # 8. 数量一致性检查
+            matched_bids = 0
+            matched_asks = 0
+            checked_prices = set()
+            MAX_ACCEPTABLE_QTY_DIFF = tolerance * 100          # 0.1%
+            MAX_WARNING_QTY_DIFF = tolerance * 100 * 5         # 0.5%
+
+            # 根据更新ID差异调整期望匹配率
+            if update_id_diff == 0:
+                EXPECTED_MATCH_RATE = 0.8  # 80%
+            elif update_id_diff < 100:
+                EXPECTED_MATCH_RATE = 0.6  # 60%
+            else:
+                EXPECTED_MATCH_RATE = 0.4  # 40%
+
+            # 检查本地买盘档位是否在快照中
+            for local_price, local_qty in local_bids.items():
+                snapshot_qty = snapshot_bids.get(local_price)
+                if snapshot_qty is not None:
+                    matched_bids += 1
+                    checked_prices.add(local_price)
+                    if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
+                        qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
+                        if qty_diff_pct > MAX_WARNING_QTY_DIFF:
+                            warnings.append(f"bid {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                        elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
+                            differences.append(f"bid {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+
+            # 检查本地卖盘档位是否在快照中
+            for local_price, local_qty in local_asks.items():
+                snapshot_qty = snapshot_asks.get(local_price)
+                if snapshot_qty is not None:
+                    matched_asks += 1
+                    checked_prices.add(local_price)
+                    if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
+                        qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
+                        if qty_diff_pct > MAX_WARNING_QTY_DIFF:
+                            warnings.append(f"ask {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                        elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
+                            differences.append(f"ask {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+
+            # 9. 验证匹配的价格档位数量
+            matched_levels = len(checked_prices)
+            total_snapshot_levels = len(snapshot_bids) + len(snapshot_asks)
+            total_local_levels = len(local_bids) + len(local_asks)
+
+            logger.info(f"匹配统计: 本地{total_local_levels}档, 匹配{matched_levels}档, 快照{total_snapshot_levels}档")
+            logger.info(f"买盘匹配: {matched_bids}/{len(local_bids)}, 卖盘匹配: {matched_asks}/{len(local_asks)}")
+            logger.info(f"更新ID差异: {update_id_diff}")
+
+            # 检查匹配率
+            if len(local_bids) > 0:
+                bid_match_rate = matched_bids / len(local_bids)
+                if bid_match_rate < EXPECTED_MATCH_RATE:
+                    differences.append(f"买盘匹配率{bid_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
+                    if bid_match_rate < 0.2:
+                        warnings.append(f"买盘匹配严重不足: {bid_match_rate:.1%}")
+
+            if len(local_asks) > 0:
+                ask_match_rate = matched_asks / len(local_asks)
+                if ask_match_rate < EXPECTED_MATCH_RATE:
+                    differences.append(f"卖盘匹配率{ask_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
+                    if ask_match_rate < 0.2:
+                        warnings.append(f"卖盘匹配严重不足: {ask_match_rate:.1%}")
+
+            # 检查快照数据完整性
+            if total_snapshot_levels < 200:  # 预期是200档（100买+100卖）
+                warnings.append(f"快照数据不完整: 只获取了{total_snapshot_levels}档（预期200档）")
+                if total_snapshot_levels < 100:
+                    logger.warning("快照数据严重不足，验证可能不可靠")
+
+            
+            # 10. 严重性判断
+            # 根据更新ID差异调整验证严格度
+            update_id_diff = update_id_info['update_id_diff']
+            
+            if update_id_diff > 0:
+                # 本地数据比快照新，允许数量差异（这是正常的市场变化）
+                # 只检查是否有严重问题，不检查普通数量差异
+                is_valid = len(critical_issues) == 0   
+                logger.info(f"本地数据比快照新 {update_id_diff} 个更新，允许数量差异")
+            else:
+                # 本地数据与快照同步，应该严格检查
+                is_valid = len(critical_issues) == 0 and len(warnings) == 0
+
+            # 构建结果
+            result = {
+                'reason': 'verification_completed',
+                'is_valid': is_valid,
+                'critical_issues': critical_issues,
+                'differences': differences,
+                'warnings': warnings,
+                'update_id_info': update_id_info,
+                'pending_updates': pending_updates,
+                'local_bids_count': len(local_bids),
+                'local_asks_count': len(local_asks),
+                'snapshot_bids_count': len(snapshot_bids),
+                'snapshot_asks_count': len(snapshot_asks),
+                'matched_price_levels': matched_levels,
+                'data_timestamp': local_ob.server_timestamp if hasattr(local_ob, 'server_timestamp') else None,
+                'snapshot_update_id': snapshot_last_update_id,
+                'local_update_id': local_last_update_id,
+                'local_data_newer': update_id_diff > 0,
+            }    
+
+            # 更新验证统计
+            self._update_verification_stats(symbol, is_valid, result)
+            
+            return is_valid, result
+            
+        except Exception as e:
+            logger.error(f"订单簿验证出错: {e}", exc_info=True)
+            error_details = {
+                'reason': 'verification_error', 
+                'error': str(e), 
+                'traceback': traceback.format_exc()
+            }
+            # 更新验证统计
+            self._update_verification_stats(symbol, False, error_details)
+            return False, error_details
+    
+    async def start_verification(self, symbol: str, interval_seconds: int = 60):
+        """启动持续验证任务"""
+        symbol = symbol.upper()
+        
+        async def verification_loop():
+            while True:
+                await asyncio.sleep(interval_seconds)
+
+                if not self.is_connected:
+                    logger.info(f"连接断开，暂停验证: {symbol}")
+                    # 等待连接恢复
+                    while not self.is_connected:
+                        await asyncio.sleep(1)
+                    logger.debug(f"连接恢复，继续验证: {symbol}")
+                
+                is_valid, details = await self.verify_orderbook_snapshot(symbol)
+                
+                # 从 update_id_info 中获取更新ID
+                update_id_info = details.get('update_id_info', {})
+                local_update_id = update_id_info.get('local_last_update_id', 'N/A')
+                snapshot_update_id = update_id_info.get('snapshot_update_id', 'N/A')
+                
+                if is_valid:
+                    logger.info(f"✅ 订单簿验证通过: {symbol} "
+                            f"(本地更新ID: {local_update_id}, 快照更新ID: {snapshot_update_id})")
+                else:
+                    logger.warning(f"⚠️ 订单簿验证失败: {symbol}, 原因: {details.get('reason')}")
+                    if 'differences' in details and details['differences']:
+                        logger.warning(f"差异详情:")
+                        for diff in details['differences'][:5]:  # 只显示前5个差异
+                            logger.warning(f"  - {diff}")
+                    
+                    # 如果数据严重不一致，可以触发重新同步
+                    if details.get('reason') in ['local_data_older', 'local_orderbook_missing', 'missing_updates_after_snapshot']:
+                        logger.critical(f"数据严重不一致: {symbol}")
+                        # 可以考虑触发重新同步
+                        # await self._init_snapshot_with_buffering(symbol)
+        
+        # 启动验证任务
+        self._verification_tasks[symbol] = asyncio.create_task(verification_loop())
+        logger.info(f"已启动 {symbol} 的验证任务，间隔: {interval_seconds}秒")
+
+    def _update_verification_stats(self, symbol: str, is_valid: bool, details: Dict):
+        """更新验证统计信息"""
+        if symbol not in self._verification_stats:
+            self._verification_stats[symbol] = {
+                'total_verifications': 0,
+                'passed_verifications': 0,
+                'failed_verifications': 0,
+                'last_verification_time': None,
+                'last_verification_result': None,
+            }
+        
+        stats = self._verification_stats[symbol]
+        stats['total_verifications'] += 1
+        
+        if is_valid:
+            stats['passed_verifications'] += 1
+        else:
+            stats['failed_verifications'] += 1
+        
+        stats['last_verification_time'] = time.time()
+        stats['last_verification_result'] = details
+        
+        logger.debug(f"验证统计更新: {symbol} - 总计: {stats['total_verifications']}, "
+                    f"通过: {stats['passed_verifications']}, 失败: {stats['failed_verifications']}")    
+
+    def get_verification_status(self, symbol: str = None) -> Dict:
+        """获取验证状态"""
+        if symbol:
+            symbol = symbol.upper()
+            stats = self._verification_stats.get(symbol, {})
+            total = stats.get('total_verifications', 0)
+            passed = stats.get('passed_verifications', 0)
+            failed = stats.get('failed_verifications', 0)
+            
+            # 计算成功率
+            if total > 0:
+                success_rate = passed / total
+            else:
+                success_rate = 0
+            
+            return {
+                'symbol': symbol,
+                'verification_enabled': self._verification_enabled,
+                'verification_running': symbol in self._verification_tasks,
+                'total_verifications': total,
+                'passed_verifications': passed,
+                'failed_verifications': failed,
+                'success_rate': f"{success_rate:.2%}",
+                'last_verification_time': stats.get('last_verification_time'),
+                'last_verification_result': stats.get('last_verification_result', {}).get('reason'),
+            }
+        else:
+            # 返回所有交易对的汇总信息
+            all_symbols = list(self._verification_stats.keys())
+            
+            # 计算总统计数据
+            total_verifications = 0
+            total_passed = 0
+            total_failed = 0
+            
+            for stats in self._verification_stats.values():
+                total_verifications += stats.get('total_verifications', 0)
+                total_passed += stats.get('passed_verifications', 0)
+                total_failed += stats.get('failed_verifications', 0)
+            
+            # 计算总成功率
+            if total_verifications > 0:
+                overall_success_rate = total_passed / total_verifications
+            else:
+                overall_success_rate = 0
+            
+            return {
+                'total_symbols': len(all_symbols),
+                'total_verifications': total_verifications,
+                'total_passed': total_passed,
+                'total_failed': total_failed,
+                'overall_success_rate': f"{overall_success_rate:.2%}",
+                'verification_enabled': self._verification_enabled,
+                'running_tasks': len(self._verification_tasks),
+                'symbols': all_symbols,
+            } 
+        
+    def print_verification_summary(self):
+        """打印验证统计摘要"""
+        print("=" * 80)
+        print("验证统计摘要")
+        print("=" * 80)
+        
+        for symbol, stats in self._verification_stats.items():
+            total = stats.get('total_verifications', 0)
+            if total > 0:
+                passed = stats.get('passed_verifications', 0)
+                failed = stats.get('failed_verifications', 0)
+                success_rate = passed / total
+                
+                print(f"{symbol}:")
+                print(f"  总计验证: {total}")
+                print(f"  通过: {passed} ({success_rate:.2%})")
+                print(f"  失败: {failed}")
+                print(f"  最后验证时间: {stats.get('last_verification_time')}")
+                print(f"  最后结果: {stats.get('last_verification_result', {}).get('reason')}")
+                print()
+
 
     def is_symbol_ready(self, symbol: str) -> bool:
         """检查symbol是否已成功初始化"""
