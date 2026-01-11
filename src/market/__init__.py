@@ -7,6 +7,7 @@ from .core import MarketData, OrderBook, TradeTick, PriceChange, ExchangeType, M
 from .adapter import BaseMarketAdapter, BinanceAdapter, BybitAdapter, DeribitAdapter, PolymarketAdapter
 from .service import WebSocketManager, WebSocketConnector, MarketRouter, ExternalOracle, DataNormalizer
 from .model import MarketSnapshot
+from .monitor import MarketMonitor
 
 __version__ = "1.0.0"
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     'MarketRouter',
     'ExternalOracle', 
     'DataNormalizer',
-    'MarketSnapshot'
+    'MarketSnapshot',
+    'MarketMonitor'
 ]

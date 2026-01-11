@@ -166,7 +166,7 @@ class BinanceAdapter(BaseAdapter):
             async with RESTConnector(base_url=self.rest_base_url, timeout=15, name=f"binance_{symbol}") as rest:
                 snapshot = await rest.get_json(f"/depth?symbol={symbol}&limit=100")
         except Exception as e:
-            logger.warning("snapshot REST failed for %s: %s", symbol, e)
+            logger.exception("snapshot REST failed for %s: %s", symbol, e)
             # do not immediately fallback to using first update — keep snapshot uninitialized
             self.snapshot_initialized[symbol] = False
             return False
@@ -220,7 +220,7 @@ class BinanceAdapter(BaseAdapter):
         for upd in filtered:
             U = upd.get('U')
             u = upd.get('u')
-            logger.info(f"applying {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
+            logger.debug(f"applying {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
             if U is None or u is None:
                 # 如果字段缺失，跳过；但保留在 buffer 里以供后续判断或直接丢弃
                 continue
@@ -231,7 +231,7 @@ class BinanceAdapter(BaseAdapter):
                     self.last_update_ids[symbol] = int(u)
                     expected = int(u) + 1
                     applied_any = True
-                    logger.info(f"applied {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
+                    logger.debug(f"applied {upd} to {symbol}, expected = {expected}, U = {U}, u = {u}")
                 except Exception:
                     logger.exception("Failed to apply chained update during init for %s", symbol)
                 break
@@ -377,9 +377,11 @@ class BinanceAdapter(BaseAdapter):
             success = await self.connector.connect()
             self.is_connected = success
             logger.info("Binance WS connected=%s", success)
+            self._record_connection_event(success)
             return success
         except Exception as e:
             logger.exception("Binance connection failed: %s", e)
+            self._record_connection_event(False)
             self.is_connected = False
             return False
 
@@ -397,7 +399,6 @@ class BinanceAdapter(BaseAdapter):
          3) 发起订阅
          4) 并行触发 _init_snapshot_with_buffering(symbol)（REST snapshot），让 WS 在此期间持续 buffer
         """
-
         if not self.is_connected:
             logger.warning("Not connected to Binance")
             return
@@ -445,7 +446,7 @@ class BinanceAdapter(BaseAdapter):
                     try:
                         if self._verification_enabled:
                             # 启动验证任务，每秒验证一次（可根据需要调整间隔）
-                            self._start_verification_task(symbol, interval_seconds=1)
+                            self.start_verification(symbol, interval_seconds=1)
                     except Exception as e:
                         logger.error(f"Failed to start verification for {symbol}: {e}Error messageClick to retry")
                 else:
@@ -567,15 +568,15 @@ class BinanceAdapter(BaseAdapter):
                         f"last_update_id={last_update_id}, expected={expected}, "
                         f"received U={current_U}, u={current_u}. Triggering re-init."
                     )
-                    asyncio.create_task(self._handle_outdated_snapshot(symbol, update_data))
+                    asyncio.create_task(self._retry_snapshot_initialization(symbol))
                     return
             else:
                 # 3. 缺少必要字段：视为错误状态，触发重新同步
                 logger.error(
                     f"Missing required fields for {symbol}: last_update_id={last_update_id}, "
-                    f"U={current_U}, u={current_u}. Triggering re-init."
+                    f"U={current_U}, u={current_u}. raw data={data}. Triggering re-init."
                 )
-                asyncio.create_task(self._handle_outdated_snapshot(symbol, update_data))
+                asyncio.create_task(self._retry_snapshot_initialization(symbol))
                 return
 
         except Exception as e:
@@ -737,7 +738,7 @@ class BinanceAdapter(BaseAdapter):
         for attempt in range(max_retries):
             try:
                 # 重置状态
-                self._cleanup_symbol_state(symbol)
+                self._reset_symbol_state(symbol)
                 
                 # 直接调用初始化（同步等待）
                 success = await self._init_snapshot_with_buffering(symbol)
@@ -877,8 +878,8 @@ class BinanceAdapter(BaseAdapter):
             for ask in local_ob.asks[:100]:
                 local_asks[ask.price] = ask.quantity
 
-            logger.info(f" 订单簿验证: {symbol} (本地bids: {local_bids}, 快照bids: {snapshot_bids})")    
-            logger.info(f" 订单簿验证: {symbol} (本地asks: {local_asks}, 快照asks: {snapshot_asks})")    
+            logger.debug(f" 订单簿验证: {symbol} (本地bids: {local_bids}, 快照bids: {snapshot_bids})")    
+            logger.debug(f" 订单簿验证: {symbol} (本地asks: {local_asks}, 快照asks: {snapshot_asks})")    
             
             # 检查差异
             differences = []
@@ -1070,7 +1071,7 @@ class BinanceAdapter(BaseAdapter):
             self._update_verification_stats(symbol, False, error_details)
             return False, error_details
     
-    async def start_verification(self, symbol: str, interval_seconds: int = 60):
+    def start_verification(self, symbol: str, interval_seconds: int = 60):
         """启动持续验证任务"""
         symbol = symbol.upper()
         
@@ -1135,7 +1136,10 @@ class BinanceAdapter(BaseAdapter):
         stats['last_verification_result'] = details
         
         logger.debug(f"验证统计更新: {symbol} - 总计: {stats['total_verifications']}, "
-                    f"通过: {stats['passed_verifications']}, 失败: {stats['failed_verifications']}")    
+                    f"通过: {stats['passed_verifications']}, 失败: {stats['failed_verifications']}")
+        
+        # 触发验证结果记录
+        self._record_verification_result(symbol, is_valid, stats)    
 
     def get_verification_status(self, symbol: str = None) -> Dict:
         """获取验证状态"""

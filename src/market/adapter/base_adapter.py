@@ -2,10 +2,12 @@ from abc import abstractmethod
 from typing import Optional, Union
 from decimal import Decimal
 from datetime import datetime, timezone
+from typing import Optional, Dict
 
 from .adapter_interface import BaseMarketAdapter
 from ..core.data_models import MarketData, ExchangeType
 from ..core.data_models import MarketData, OrderBook, ExchangeType, MarketType, TradeTick
+from ..monitor.collector import MarketMonitor
 from logger.logger import get_logger
 
 logger = get_logger()
@@ -17,6 +19,7 @@ class BaseAdapter(BaseMarketAdapter):
         super().__init__(name)
         self.exchange_type = exchange_type
         self.subscribed_symbols = set()
+        self.monitor = None  # 将稍后设置
         
     async def subscribe(self, symbols: list):
         """订阅交易对"""
@@ -98,3 +101,76 @@ class BaseAdapter(BaseMarketAdapter):
         except Exception as e:
             logger.error(f"❌ Error creating market data: {e}")
             return None
+        
+    def set_monitor(self, monitor: MarketMonitor):
+        """设置监控器"""
+        self.monitor = monitor
+        if self.monitor:
+            self.monitor.register_adapter(
+                adapter_name=self.name,
+                exchange_type=self.exchange_type,
+            )  
+
+    def update_basic_stats(self, latency_ms: Optional[float] = None):
+        """更新基础统计指标"""
+        if not hasattr(self, 'monitor') or not self.monitor:
+            return
+            
+        try:
+            metrics = self.monitor.get_metrics(self.name)
+            
+            # 更新接收和处理计数
+            metrics.data.messages_received += 1
+            metrics.data.messages_processed += 1
+
+            # 更新订阅列表（如果适配器有这个属性）
+            if hasattr(self, 'subscribed_symbols'):
+                metrics.data.subscribed_symbols = self.subscribed_symbols.copy()
+            
+            # 更新延迟
+            self._record_latency(latency_ms)
+                      
+        except Exception as e:
+            logger.exception(f"更新基础统计失败: {e}")          
+    
+    def _record_base_metrics(self, latency_ms: float = None, 
+                           processing_ms: float = None,
+                           is_connected: bool = None):
+        """记录基础指标"""
+        if not self.monitor:
+            return
+        
+        if latency_ms is not None:
+            self.monitor.record_latency(self.name, latency_ms)
+        
+        if processing_ms is not None:
+            self.monitor.record_processing_time(self.name, processing_ms)
+        
+        if is_connected is not None:
+            self.monitor.record_connection_status(self.name, is_connected)
+    
+    def _record_verification_result(self, symbol: str, is_valid: bool, details: Dict):
+        """触发验证结果记录（内部方法）"""
+        if self.monitor:
+            self.monitor.record_validation_result(
+                adapter_name=self.name,
+                symbol=symbol,
+                is_valid=is_valid,
+                details=details
+            )
+    
+    def _record_latency(self, latency_ms: float):
+        """触发延迟记录（内部方法）"""
+        if self.monitor:
+            self.monitor.record_latency(
+                adapter_name=self.name,
+                latency_ms=latency_ms
+            )
+    
+    def _record_connection_event(self, is_connected: bool):
+        """触发连接事件记录"""
+        if self.monitor:
+            self.monitor.record_connection_status(
+                adapter_name=self.name,
+                is_connected=is_connected
+            )    

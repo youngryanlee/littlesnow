@@ -48,7 +48,7 @@ class MarketRouter:
                     logger.debug(f"  ✅ MarketRouter 第 {i+1} 个回调调用成功")
                 except Exception as e:
                     logger.debug(f"  ❌ MarketRouter 第 {i+1} 个回调调用失败: {e}")
-                    logger.error(f"Error in market data callback: {e}")
+                    logger.exception(f"Error in market data callback: {e}")
                     
             # 检查是否需要生成快照
             self._check_snapshot_creation(data)

@@ -126,14 +126,26 @@ class WebSocketManager:
                 }
         return status
         
-    async def subscribe_all(self, symbols: List[str]):
-        """在所有适配器上订阅交易对"""
-        subscription_tasks = []
-        for name, adapter in self.adapters.items():
-            if adapter.is_connected:
-                logger.info(f"Subscribing {name} to {symbols} using {adapter}")
-                subscription_tasks.append(adapter.subscribe(symbols))
+    async def subscribe(self, name: str, symbols: List[str]):
+        """订阅指定适配器的交易对"""
+        if name not in self.adapters:
+            logger.error(f"Adapter {name} not found")
+            return False
         
-        if subscription_tasks:
-            await asyncio.gather(*subscription_tasks, return_exceptions=True)
-            logger.info(f"Subscribed all adapters to {symbols}")
+        adapter = self.adapters[name]
+        if not adapter.is_connected:
+            logger.error(f"Adapter {name} is not connected")
+            return False
+        
+        if not symbols:
+            logger.warning(f"No symbols provided for adapter {name}")
+            return False
+        
+        try:
+            logger.info(f"Subscribing {name} to {symbols}")
+            await adapter.subscribe(symbols)
+            logger.info(f"Successfully subscribed {name} to {symbols}")
+            return True
+        except Exception as e:
+            logger.exception(f"Failed to subscribe {name} to {symbols}: {e}")
+            return False

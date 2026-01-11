@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from market import (
     PolymarketAdapter, WebSocketManager, MarketRouter,
-    MarketData, ExchangeType, MarketType
+    MarketData, ExchangeType, MarketType, MarketMonitor
 )
 
 # 配置详细日志
@@ -24,30 +24,6 @@ logger = logging.getLogger(__name__)
 
 class PolymarketTestBase:
     """Polymarket 测试基类"""
-    
-    async def get_active_markets(self, adapter: PolymarketAdapter, limit: int = 5) -> list:
-        """获取活跃市场列表"""
-        logger.info(f"获取前 {limit} 个活跃市场...")
-        try:
-            markets = await adapter.get_active_market(limit)
-            
-            if not markets:
-                logger.warning("无法获取活跃市场列表，使用测试市场ID")
-                # 返回一些已知的测试市场ID
-                return [
-                    "0x4d792047616d65206f66205468756d62",  # 示例市场ID
-                    "0x1234567890abcdef1234567890abcdef12345678"
-                ]
-                
-            market_ids = [market['id'] for market in markets if market.get('id')]
-            logger.info(f"找到 {len(market_ids)} 个活跃市场: {market_ids}")
-            return market_ids
-        except Exception as e:
-            logger.warning(f"获取市场列表失败: {e}，使用测试市场ID")
-            return [
-                "0x4d792047616d65206f66205468756d62",
-                "0x1234567890abcdef1234567890abcdef12345678"
-            ]
 
 @pytest.mark.integration
 @pytest.mark.asyncio
@@ -67,6 +43,10 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         logger.debug("🔍 注册 Polymarket 适配器...")
         ws_manager.register_adapter('polymarket', polymarket)
         market_router.register_adapter('polymarket', polymarket)
+
+        # 创建监控器
+        monitor = MarketMonitor()
+        polymarket.set_monitor(monitor)
         
         # 用于收集接收到的数据，按消息类型分类
         received_data = {
@@ -102,7 +82,7 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
             
             elif msg_type == 'trade':
                 if data.last_trade:
-                    logger.info(f"  最新交易: {data.last_trade.quantity} @ {data.last_trade.price}")
+                    logger.info(f"  最新交易: {data.last_trade.size} @ {data.last_trade.price}")
                 if data.last_price:
                     logger.info(f"  最新价格: {data.last_price}")
             
@@ -134,9 +114,9 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取活跃市场并订阅
-            market_ids = await self.get_active_markets(polymarket, 3)
+            market_ids = await polymarket.get_active_market_id(3)
             logger.info(f"📡 订阅市场: {market_ids}")
-            await ws_manager.subscribe_all(market_ids)
+            await ws_manager.subscribe(ExchangeType.POLYMARKET.value, market_ids)
             
             # 等待接收数据（30秒）
             logger.info("⏳ 等待接收市场数据（30秒）...")
@@ -214,6 +194,10 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         
         ws_manager = WebSocketManager()
         ws_manager.register_adapter('polymarket', polymarket)
+
+        # 创建监控器
+        monitor = MarketMonitor()
+        polymarket.set_monitor(monitor)
         
         try:
             await ws_manager.start()
@@ -226,8 +210,8 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取活跃市场并订阅
-            market_ids = await self.get_active_markets(polymarket, 2)
-            await ws_manager.subscribe_all(market_ids)
+            market_ids = await  polymarket.get_active_market_id(2)
+            await ws_manager.subscribe(ExchangeType.POLYMARKET.value, market_ids)
             
             # 收集20秒的订单簿数据
             logger.info("收集20秒订单簿数据...")
@@ -289,6 +273,10 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         
         ws_manager = WebSocketManager()
         ws_manager.register_adapter('polymarket', polymarket)
+
+        # 创建监控器
+        monitor = MarketMonitor()
+        polymarket.set_monitor(monitor)
         
         try:
             await ws_manager.start()
@@ -302,8 +290,8 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取活跃市场并订阅
-            market_ids = await self.get_active_markets(polymarket, 2)
-            await ws_manager.subscribe_all(market_ids)
+            market_ids = await  polymarket.get_active_market_id(2)
+            await ws_manager.subscribe(ExchangeType.POLYMARKET.value, market_ids)
             
             # 收集15秒的交易数据
             logger.info("收集15秒交易数据...")
@@ -360,6 +348,10 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
         
         ws_manager = WebSocketManager()
         ws_manager.register_adapter('polymarket', polymarket)
+
+        # 创建监控器
+        monitor = MarketMonitor()
+        polymarket.set_monitor(monitor)
         
         try:
             await ws_manager.start()
@@ -374,12 +366,12 @@ class TestPolymarketLiveConnection(PolymarketTestBase):
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取活跃市场并订阅
-            market_ids = await self.get_active_markets(polymarket, 2)
+            market_ids = await  polymarket.get_active_market_id(2)
             logger.info(f"获取到的市场ID: {market_ids}")
             
             # 🎯 关键：确保订阅了 PRICE 类型，而不仅仅是 ORDERBOOK
             # 价格变动数据通常是通过 PRICE 订阅类型获取的
-            await ws_manager.subscribe_all(market_ids)
+            await ws_manager.subscribe(ExchangeType.POLYMARKET.value, market_ids)
             
             # 给订阅一些时间
             await asyncio.sleep(3)
@@ -447,6 +439,10 @@ class TestPolymarketReconnection(PolymarketTestBase):
         
         ws_manager.register_adapter('polymarket', polymarket)
         market_router.register_adapter('polymarket', polymarket)
+
+        # 创建监控器
+        monitor = MarketMonitor()
+        polymarket.set_monitor(monitor)
         
         connection_events = []
         data_count_before_disconnect = 0
@@ -468,8 +464,8 @@ class TestPolymarketReconnection(PolymarketTestBase):
                 pytest.skip("Polymarket WebSocket 连接失败，跳过测试")
             
             # 获取并订阅市场
-            market_ids = await self.get_active_markets(polymarket, 2)
-            await ws_manager.subscribe_all(market_ids)
+            market_ids = await  polymarket.get_active_market_id(2)
+            await ws_manager.subscribe(ExchangeType.POLYMARKET.value, market_ids)
             
             # 等待一些数据
             await asyncio.sleep(10)

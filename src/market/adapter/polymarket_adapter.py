@@ -13,7 +13,8 @@ from logger.logger import get_logger
 from .base_adapter import BaseAdapter
 from ..service.ws_connector import WebSocketConnector
 from ..service.rest_connector import RESTConnector
-from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, MarketType, TradeTick, PriceChange, MakerOrder, Trade
+from ..core.data_models import MarketMeta, MarketData, OrderBook, OrderBookLevel, ExchangeType, TradeTick, PriceChange, MakerOrder, Trade
+from ..monitor.collector import MarketMonitor
 
 logger = get_logger()
 
@@ -41,7 +42,7 @@ class CachedMarket:
     
     def is_expired(self, ttl: int) -> bool:
         return time.time() - self.timestamp > ttl    
-    
+'''    
 class PerformanceMonitor:
     """延迟监控器"""
     
@@ -76,6 +77,7 @@ class PerformanceMonitor:
             "last_update": None,
             "errors": 0
         }    
+'''
 
 class PolymarketAdapter(BaseAdapter):
     """Polymarket WebSocket 适配器 - 毫秒级性能"""
@@ -101,7 +103,7 @@ class PolymarketAdapter(BaseAdapter):
         # 性能监控
         self.message_count = 0
         self.last_message_time = None
-        self.monitor = PerformanceMonitor()
+        self.monitor = MarketMonitor()
         # 时钟同步状态（用于校准）
         self.clock_offset_ms = 0  # 本地时钟 - 服务器时钟#
 
@@ -238,6 +240,7 @@ class PolymarketAdapter(BaseAdapter):
 
             # 检查连接结果并启动 Ping
             all_connected = True
+
             for sub_type, result in zip(self.connectors.keys(), results):
                 if isinstance(result, Exception) or not result:
                     logger.error(f"❌ Failed to connect to {sub_type.value}: {result}")
@@ -256,16 +259,27 @@ class PolymarketAdapter(BaseAdapter):
                 if any(self.subscription_status.values()):
                     await asyncio.sleep(0.5)  # 给连接一点时间稳定
                     await self._resubscribe_all()
+
+                # 更新监控指标
+                if self.monitor:
+                    self._record_connection_event(self.is_connected)
                 
                 return True
             else:
                 logger.error("❌ Some WebSocket endpoints failed to connect")
                 self.is_connected = False
+                # 更新监控指标
+                if self.monitor:
+                    self._record_connection_event(self.is_connected)
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ WebSocket connection failed: {e}")
+            logger.exception(f"❌ WebSocket connection failed: {e}")
             self.is_connected = False
+            # 更新监控指标
+            if self.monitor:
+                self._record_connection_event(self.is_connected)
+
             return False
         
     async def disconnect(self):
@@ -671,13 +685,9 @@ class PolymarketAdapter(BaseAdapter):
             dt = datetime.fromtimestamp(st / 1000, tz=timezone.utc)
             print("========>>>>>>>>server_time:", dt, "server_timestamp_ms: ", st)
             print("========>>>>>>>>delta: ", current_time - dt)
-
-            # 计算网络延迟
-            latency_ms = self._calculate_network_latency(raw_data, receive_timestamp_ms)
             
             # 更新延迟统计
-            if latency_ms is not None:
-                self._update_latency_stats(message_type, latency_ms, receive_timestamp_ms)
+            self._update_monitor_stats(raw_data, receive_timestamp_ms)
  
                 
             # 根据消息类型处理
@@ -719,7 +729,7 @@ class PolymarketAdapter(BaseAdapter):
                 logger.warning(f"❓ 未知消息类型: {message_type}")
                     
         except Exception as e:
-            logger.error(f"❌ Error processing WebSocket message: {e}")
+            logger.exception(f"❌ Error processing WebSocket message: {e}")
             
     def _handle_orderbook(self, data: Dict, receive_timestamp: int):
         """处理订单簿更新 - 高性能版本"""
@@ -1114,78 +1124,126 @@ class PolymarketAdapter(BaseAdapter):
             logger.debug(f"无法计算延迟: {e}")
             return None
         
-    def _update_latency_stats(self, message_type: str, latency_ms: float, timestamp_ms: int):
-        """更新延迟统计"""
-        stats_key = message_type
-        
-        if stats_key not in self.monitor.realtime_stats:
-            return
+    def _update_monitor_stats(self, data: Dict, timestamp_ms: int):
+        message_type = data.get('event_type')
+
+        latency_ms = self._calculate_network_latency(data, timestamp_ms)
+
+        """ 更新统计 """
+        try:
+            # 获取监控指标
+            metrics = self.monitor.get_metrics(self.name)
+
+            """1. 更新基础统计"""
+            self.update_basic_stats(latency_ms)
             
-        stats = self.monitor.realtime_stats[stats_key]
-        all_stats = self.monitor.realtime_stats["all"]
-        
-        # 更新计数
-        stats["count"] += 1
-        all_stats["count"] += 1
-        
-        # 更新时间
-        now = datetime.now(timezone.utc)
-        stats["last_time"] = now
-        all_stats["last_time"] = now
-        
-        # 更新EWMA延迟
-        alpha = 0.9
-        stats["latency_ewma"] = stats["latency_ewma"] * alpha + latency_ms * (1 - alpha)
-        all_stats["latency_ewma"] = all_stats["latency_ewma"] * alpha + latency_ms * (1 - alpha)
-        
-        # 更新极值
-        stats["latency_min"] = min(stats["latency_min"], latency_ms)
-        stats["latency_max"] = max(stats["latency_max"], latency_ms)
-        all_stats["latency_min"] = min(all_stats["latency_min"], latency_ms)
-        all_stats["latency_max"] = max(all_stats["latency_max"], latency_ms)
-        
-        # 记录到历史窗口
-        self.monitor.latency_history[stats_key].append(latency_ms)
-        self.monitor.latency_history["all"].append(latency_ms)
-        
-        # 定期计算百分位
-        if stats["count"] % 100 == 0:
-            self._calculate_percentiles(stats_key)
-            self._calculate_throughput(stats_key)
-        
+            stats_key = message_type
+            
+            # 确保有对应的统计项
+            if stats_key not in metrics.data.realtime_stats:
+                logger.warning(f"未知的消息类型: {stats_key}")
+                return
+                
+            stats = metrics.data.realtime_stats[stats_key]  # MessageStat 对象
+            all_stats = metrics.data.realtime_stats["all"]  # MessageStat 对象
+            
+            # 将时间戳转换为 datetime 对象（如果需要）
+            from datetime import datetime, timezone
+            timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000.0, timezone.utc)
+            
+            """1. 更新延迟统计"""
+            stats.update(latency_ms, timestamp_dt)
+            all_stats.update(latency_ms, timestamp_dt)
+            
+            # 记录到历史窗口
+            metrics.data.latency_history[stats_key].append(latency_ms)
+            metrics.data.latency_history["all"].append(latency_ms)
+            
+            # 定期计算百分位
+            if stats.count % 100 == 0:
+                self._calculate_percentiles(stats_key)
+                self._calculate_throughput(stats_key)
+            
+        except Exception as e:
+            logger.error(f"更新延迟统计失败: {e}")
+
     def _calculate_percentiles(self, stats_key: str):
         """计算延迟百分位"""
-        history = self.monitor.latency_history[stats_key]
-        if len(history) < 10:
-            return
+        try:
+            metrics = self.monitor.get_metrics(self.name)
             
-        sorted_latencies = sorted(history)
-        n = len(sorted_latencies)
-        
-        stats = self.monitor.realtime_stats[stats_key]
-        
-        # P50（中位数）
-        stats["latency_p50"] = sorted_latencies[n // 2]
-        
-        # P95
-        idx_95 = int(n * 0.95)
-        stats["latency_p95"] = sorted_latencies[min(idx_95, n-1)]
-        
-        # P99
-        idx_99 = int(n * 0.99)
-        stats["latency_p99"] = sorted_latencies[min(idx_99, n-1)]
-        
+            if not hasattr(metrics.data, 'latency_history'):
+                return
+                
+            history = metrics.data.latency_history[stats_key]
+            if len(history) < 10:
+                return
+                
+            # 转换为列表并排序
+            latencies = list(history)  # history 是 deque
+            sorted_latencies = sorted(latencies)
+            n = len(sorted_latencies)
+            
+            stats = metrics.data.realtime_stats[stats_key]
+            
+            # P50（中位数）
+            stats.latency_p50 = sorted_latencies[n // 2]
+            
+            # P95
+            idx_95 = int(n * 0.95)
+            stats.latency_p95 = sorted_latencies[min(idx_95, n-1)]
+            
+            # P99
+            idx_99 = int(n * 0.99)
+            stats.latency_p99 = sorted_latencies[min(idx_99, n-1)]
+            
+            # 记录日志
+            if stats_key != "all" and stats.count % 100 == 0:
+                logger.debug(f"百分位计算完成 [{stats_key}]: "
+                                f"P50={stats.latency_p50:.1f}ms, "
+                                f"P95={stats.latency_p95:.1f}ms, "
+                                f"P99={stats.latency_p99:.1f}ms")
+            
+        except Exception as e:
+            logger.error(f"计算百分位失败 [{stats_key}]: {e}")
+
     def _calculate_throughput(self, stats_key: str):
         """计算吞吐量"""
-        stats = self.monitor.realtime_stats[stats_key]
-        if stats["last_update"]:
-            time_diff = (datetime.now(timezone.utc) - stats["last_update"]).total_seconds()
-            if time_diff > 0:
-                # 基于最近100条消息计算吞吐量
-                recent_count = min(100, stats["count"])
-                stats["throughput_1s"] = recent_count / time_diff if time_diff < 100 else 0
-                stats["throughput_1m"] = recent_count / (time_diff / 60) if time_diff > 0 else 0
-        stats["last_update"] = datetime.now(timezone.utc)
+        try:
+            metrics = self.monitor.get_metrics(self.name)
+            stats = metrics.data.realtime_stats[stats_key]
+            
+            if stats.last_update:
+                # 将时间戳转换为 datetime（如果需要）
+                from datetime import datetime, timezone
+                last_update_dt = datetime.fromtimestamp(stats.last_update / 1000.0, timezone.utc)
+                now = datetime.now(timezone.utc)
+                
+                time_diff = (now - last_update_dt).total_seconds()
+                if time_diff > 0:
+                    # 基于最近消息计算吞吐量
+                    recent_count = min(100, stats.count)
+                    
+                    # 每秒吞吐量
+                    if time_diff <= 100:  # 限制时间窗口
+                        stats.throughput_1s = recent_count / time_diff
+                    else:
+                        stats.throughput_1s = 0
+                    
+                    # 每分钟吞吐量
+                    stats.throughput_1m = recent_count / (time_diff / 60)
+                    
+                    # 记录日志
+                    if stats_key != "all" and stats.count % 100 == 0:
+                        logger.debug(f"吞吐量计算完成 [{stats_key}]: "
+                                        f"1s={stats.throughput_1s:.1f} msg/s, "
+                                        f"1m={stats.throughput_1m:.1f} msg/min")
+                else:
+                    stats.throughput_1s = 0
+                    stats.throughput_1m = 0
+                    
+        except Exception as e:
+            logger.error(f"计算吞吐量失败 [{stats_key}]: {e}")
         
     def get_connection_status(self) -> Dict:
         """获取所有连接的详细状态"""
@@ -1528,6 +1586,22 @@ class PolymarketAdapter(BaseAdapter):
     async def get_active_market(self, limit: int = 50) -> List[Dict]:
         return await self.get_market_list(False, limit)
         
+    async def get_active_market_id(self, limit: int = 5) -> list:
+        """获取活跃市场列表"""
+        logger.info(f"获取前 {limit} 个活跃市场...")
+        try:
+            markets = await self.get_active_market(limit)
+            
+            if not markets:
+                logger.warning("无法获取活跃市场列表，使用测试市场ID")
+                return None
+                
+            market_ids = [market['id'] for market in markets if market.get('id')]
+            logger.info(f"找到 {len(market_ids)} 个活跃市场: {market_ids}")
+            return market_ids
+        except Exception as e:
+            logger.warning(f"获取市场列表失败: {e}，使用测试市场ID")
+            return None
     
     '''
         对外封装接口
