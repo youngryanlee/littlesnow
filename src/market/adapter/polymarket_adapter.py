@@ -398,6 +398,7 @@ class PolymarketAdapter(BaseAdapter):
             if success:
                 for asset_id in asset_ids:
                     self.subscription_status[subscription_type].add(asset_id)
+                    self.subscribed_symbols.add(asset_id)
                 
         except Exception as e:
             logger.error(f"❌ {subscription_type.value} 订阅失败: {e}")
@@ -686,8 +687,13 @@ class PolymarketAdapter(BaseAdapter):
             print("========>>>>>>>>server_time:", dt, "server_timestamp_ms: ", st)
             print("========>>>>>>>>delta: ", current_time - dt)
             
-            # 更新延迟统计
-            self._update_monitor_stats(raw_data, receive_timestamp_ms)
+            # 更新监控统计
+            server_ts_str = raw_data.get('timestamp')
+            if not server_ts_str:
+                logger.error(f"raw data received error: {raw_data}")
+                return
+            server_timestamp_ms = int(server_ts_str)
+            self._update_monitor_stats(message_type, server_timestamp_ms, receive_timestamp_ms)
  
                 
             # 根据消息类型处理
@@ -1092,159 +1098,6 @@ class PolymarketAdapter(BaseAdapter):
     '''
         监控接口
     '''               
-    def _calculate_network_latency(self, data: Dict, receive_timestamp_ms: int) -> Optional[float]:
-        """计算网络延迟 - 保持数据真实性"""
-        try:
-            # 获取服务器时间戳
-            server_ts_str = data.get('timestamp')
-            if not server_ts_str:
-                return None
-                   
-            server_ts = int(server_ts_str)
-            
-            # 计算原始延迟
-            raw_latency_ms = receive_timestamp_ms - server_ts
-            
-            # ✅ 不进行任何修正，保持原始值
-            # 这样可以：
-            # 1. 发现负延迟（时钟不同步）
-            # 2. 发现高延迟（网络问题）
-            # 3. 保持数据真实性
-            
-            # 记录异常情况，但不修正数据
-            if raw_latency_ms < 0:
-                logger.warning(f"负延迟: {raw_latency_ms}ms (服务器时间可能比本地晚)")
-                
-            elif raw_latency_ms > 10000:  # 10秒
-                logger.warning(f"高延迟: {raw_latency_ms}ms (可能网络有问题)")
-                
-            return raw_latency_ms  # ✅ 返回原始值
-                
-        except (ValueError, TypeError) as e:
-            logger.debug(f"无法计算延迟: {e}")
-            return None
-        
-    def _update_monitor_stats(self, data: Dict, timestamp_ms: int):
-        message_type = data.get('event_type')
-
-        latency_ms = self._calculate_network_latency(data, timestamp_ms)
-
-        """ 更新统计 """
-        try:
-            # 获取监控指标
-            metrics = self.monitor.get_metrics(self.name)
-
-            """1. 更新基础统计"""
-            self.update_basic_stats(latency_ms)
-            
-            stats_key = message_type
-            
-            # 确保有对应的统计项
-            if stats_key not in metrics.data.realtime_stats:
-                logger.warning(f"未知的消息类型: {stats_key}")
-                return
-                
-            stats = metrics.data.realtime_stats[stats_key]  # MessageStat 对象
-            all_stats = metrics.data.realtime_stats["all"]  # MessageStat 对象
-            
-            # 将时间戳转换为 datetime 对象（如果需要）
-            from datetime import datetime, timezone
-            timestamp_dt = datetime.fromtimestamp(timestamp_ms / 1000.0, timezone.utc)
-            
-            """1. 更新延迟统计"""
-            stats.update(latency_ms, timestamp_dt)
-            all_stats.update(latency_ms, timestamp_dt)
-            
-            # 记录到历史窗口
-            metrics.data.latency_history[stats_key].append(latency_ms)
-            metrics.data.latency_history["all"].append(latency_ms)
-            
-            # 定期计算百分位
-            if stats.count % 100 == 0:
-                self._calculate_percentiles(stats_key)
-                self._calculate_throughput(stats_key)
-            
-        except Exception as e:
-            logger.error(f"更新延迟统计失败: {e}")
-
-    def _calculate_percentiles(self, stats_key: str):
-        """计算延迟百分位"""
-        try:
-            metrics = self.monitor.get_metrics(self.name)
-            
-            if not hasattr(metrics.data, 'latency_history'):
-                return
-                
-            history = metrics.data.latency_history[stats_key]
-            if len(history) < 10:
-                return
-                
-            # 转换为列表并排序
-            latencies = list(history)  # history 是 deque
-            sorted_latencies = sorted(latencies)
-            n = len(sorted_latencies)
-            
-            stats = metrics.data.realtime_stats[stats_key]
-            
-            # P50（中位数）
-            stats.latency_p50 = sorted_latencies[n // 2]
-            
-            # P95
-            idx_95 = int(n * 0.95)
-            stats.latency_p95 = sorted_latencies[min(idx_95, n-1)]
-            
-            # P99
-            idx_99 = int(n * 0.99)
-            stats.latency_p99 = sorted_latencies[min(idx_99, n-1)]
-            
-            # 记录日志
-            if stats_key != "all" and stats.count % 100 == 0:
-                logger.debug(f"百分位计算完成 [{stats_key}]: "
-                                f"P50={stats.latency_p50:.1f}ms, "
-                                f"P95={stats.latency_p95:.1f}ms, "
-                                f"P99={stats.latency_p99:.1f}ms")
-            
-        except Exception as e:
-            logger.error(f"计算百分位失败 [{stats_key}]: {e}")
-
-    def _calculate_throughput(self, stats_key: str):
-        """计算吞吐量"""
-        try:
-            metrics = self.monitor.get_metrics(self.name)
-            stats = metrics.data.realtime_stats[stats_key]
-            
-            if stats.last_update:
-                # 将时间戳转换为 datetime（如果需要）
-                from datetime import datetime, timezone
-                last_update_dt = datetime.fromtimestamp(stats.last_update / 1000.0, timezone.utc)
-                now = datetime.now(timezone.utc)
-                
-                time_diff = (now - last_update_dt).total_seconds()
-                if time_diff > 0:
-                    # 基于最近消息计算吞吐量
-                    recent_count = min(100, stats.count)
-                    
-                    # 每秒吞吐量
-                    if time_diff <= 100:  # 限制时间窗口
-                        stats.throughput_1s = recent_count / time_diff
-                    else:
-                        stats.throughput_1s = 0
-                    
-                    # 每分钟吞吐量
-                    stats.throughput_1m = recent_count / (time_diff / 60)
-                    
-                    # 记录日志
-                    if stats_key != "all" and stats.count % 100 == 0:
-                        logger.debug(f"吞吐量计算完成 [{stats_key}]: "
-                                        f"1s={stats.throughput_1s:.1f} msg/s, "
-                                        f"1m={stats.throughput_1m:.1f} msg/min")
-                else:
-                    stats.throughput_1s = 0
-                    stats.throughput_1m = 0
-                    
-        except Exception as e:
-            logger.error(f"计算吞吐量失败 [{stats_key}]: {e}")
-        
     def get_connection_status(self) -> Dict:
         """获取所有连接的详细状态"""
         # 计算全局连接状态（所有连接器都连接才算真正连接）

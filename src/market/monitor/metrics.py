@@ -76,54 +76,151 @@ class BaseMetrics:
     last_heartbeat: Optional[datetime] = None
     subscribed_symbols: List[str] = field(default_factory=list)
     
-    # === 延迟指标（核心）===
-    latency_ms: List[float] = field(default_factory=list)  # 网络延迟
-    processing_ms: List[float] = field(default_factory=list)  # 处理延迟
-    
     # === 性能指标 ===
     messages_received: int = 0
     messages_processed: int = 0
     errors: int = 0
-    
+
+    # === 延迟指标（核心）===
+    window_size: int = field(default=1000, init=False)
+    latency_history: Dict[str, Deque[float]] = field(default_factory=dict, init=False)
+    message_stats: Dict[str, MessageStat] = field(default_factory=dict, init=False)  
+
     def __post_init__(self):
         # 确保列表初始化
-        if not isinstance(self.latency_ms, list):
-            self.latency_ms = []
-        if not isinstance(self.processing_ms, list):
-            self.processing_ms = []
         if not isinstance(self.subscribed_symbols, list):
             self.subscribed_symbols = []
+
+        # 初始化统一统计结构
+        self.window_size = 1000
+        self.latency_history = defaultdict(lambda: deque(maxlen=self.window_size))
+        
+        # 初始化message_stats，确保有"all"
+        self.message_stats = {
+            "all": MessageStat()
+        }    
+    
+    def add_latency(self, message_type: str, latency_ms: float, timestamp: datetime):
+        """添加延迟样本 - 统一接口"""
+        # 更新基础计数
+        self.messages_received += 1
+        self.messages_processed += 1  # 假设处理成功
+
+        # 确保有"all"统计
+        if "all" not in self.message_stats:
+            self.message_stats["all"] = MessageStat()
+            self.latency_history["all"] = deque(maxlen=self.window_size)
+        
+        # 更新统计
+        if message_type not in self.message_stats:
+            # 自动创建新的消息类型统计
+            self.message_stats[message_type] = MessageStat()
+            self.latency_history[message_type] = deque(maxlen=self.window_size)
+        
+        stats = self.message_stats[message_type]
+        all_stats = self.message_stats["all"]
+        
+        # 更新统计
+        stats.update(latency_ms, timestamp)
+        all_stats.update(latency_ms, timestamp)
+        
+        # 添加到历史
+        self.latency_history[message_type].append(latency_ms)
+        self.latency_history["all"].append(latency_ms)
+        
+        # 定期计算百分位（每10条消息）
+        if stats.count % 10 == 0 or stats.count == 10:
+            self._update_percentiles(message_type)
+        
+        if all_stats.count % 10 == 0 or all_stats.count == 10:
+            self._update_percentiles("all")
+    
+    def _update_percentiles(self, message_type: str):
+        """更新百分位统计"""
+        try:
+            history = self.latency_history[message_type]
+            if len(history) < 10:
+                return
+                
+            latencies = list(history)
+            sorted_latencies = sorted(latencies)
+            n = len(sorted_latencies)
+            
+            stats = self.message_stats[message_type]
+            
+            # 计算百分位
+            stats.latency_p50 = sorted_latencies[n // 2]
+            idx_95 = min(int(n * 0.95), n - 1)
+            stats.latency_p95 = sorted_latencies[idx_95]
+            idx_99 = min(int(n * 0.99), n - 1)
+            stats.latency_p99 = sorted_latencies[idx_99]
+                
+        except Exception:
+            pass  # 忽略计算错误
+        
+    def _get_percentile(self, percentile: int) -> float:
+        """获取百分位 - 实时计算"""
+        history = self.latency_history.get("all")
+        if not history or len(history) < 5:
+            return 0.0
+            
+        latencies = list(history)
+        if len(latencies) < 5:
+            return 0.0
+            
+        sorted_latencies = sorted(latencies)
+        n = len(sorted_latencies)
+        
+        # 计算百分位索引
+        idx = min(int(n * percentile / 100), n - 1)
+        result = sorted_latencies[idx]
+        
+        # 同时更新MessageStat中的值，避免下次再计算
+        stats = self.message_stats.get("all")
+        if stats:
+            if percentile == 50:
+                stats.latency_p50 = result
+            elif percentile == 95:
+                stats.latency_p95 = result
+            elif percentile == 99:
+                stats.latency_p99 = result
+        
+        return result    
+    
+    @property
+    def error_rate(self) -> float:
+        """错误率"""
+        if self.messages_received == 0:
+            return 0.0
+        return self.errors / self.messages_received
     
     @property
     def avg_latency(self) -> float:
-        """平均延迟"""
-        return statistics.mean(self.latency_ms) if self.latency_ms else 0.0
+        """平均延迟 - 从all统计获取"""
+        stats = self.message_stats.get("all")
+        return stats.latency_ewma if stats else 0.0
     
     @property
     def max_latency(self) -> float:
         """最大延迟"""
-        return max(self.latency_ms) if self.latency_ms else 0.0
+        stats = self.message_stats.get("all")
+        return stats.latency_max if stats else 0.0
     
+    # 修改获取属性，实时计算
     @property
     def p50_latency(self) -> float:
         """P50延迟"""
-        if not self.latency_ms:
-            return 0.0
-        return statistics.quantiles(self.latency_ms, n=100)[49] if len(self.latency_ms) >= 2 else self.avg_latency
+        return self._get_percentile(50)
     
     @property
     def p95_latency(self) -> float:
         """P95延迟"""
-        if not self.latency_ms:
-            return 0.0
-        return statistics.quantiles(self.latency_ms, n=100)[94] if len(self.latency_ms) >= 2 else self.max_latency
+        return self._get_percentile(95)
     
     @property
     def p99_latency(self) -> float:
         """P99延迟"""
-        if not self.latency_ms:
-            return 0.0
-        return statistics.quantiles(self.latency_ms, n=100)[98] if len(self.latency_ms) >= 2 else self.max_latency
+        return self._get_percentile(99)
     
     @property
     def throughput_1s(self) -> float:
@@ -131,12 +228,6 @@ class BaseMetrics:
         if len(self.latency_ms) < 2:
             return 0.0
         return len(self.latency_ms) / (self.latency_ms[-1] - self.latency_ms[0]) * 1000 if self.latency_ms[-1] > self.latency_ms[0] else 0.0
-    
-    @property
-    def error_rate(self) -> float:
-        """错误率"""
-        total = self.messages_received + self.errors
-        return self.errors / total if total > 0 else 0.0
 
 
 @dataclass
@@ -145,25 +236,27 @@ class BinanceMetrics(BaseMetrics):
     
     # === Binance特有指标 ===
     pending_buffer_sizes: List[int] = field(default_factory=list)
-    update_gaps: List[int] = field(default_factory=list)
-    snapshot_initialization_time: List[float] = field(default_factory=list)
-    validation_ms: List[float] = field(default_factory=list)
+    validation_time: List[float] = field(default_factory=list)
     
     # === 订单簿验证指标 ===
     validations_total: int = 0
     validations_success: int = 0
     validations_failed: int = 0
+    validations_warnings: int = 0
+
+    def __post_init__(self):
+        super().__post_init__()
+        # Binance特有的消息类型
+        self.message_stats.update({
+            "depthUpdate": MessageStat(),  # 深度更新
+            "trade": MessageStat(),  # 交易
+            "all": MessageStat(),
+        })
     
     @property
     def validation_success_rate(self) -> float:
         """验证成功率"""
-        total = self.validations_success + self.validations_failed
-        return self.validations_success / total if total > 0 else 0.0
-    
-    @property
-    def avg_validation_time(self) -> float:
-        """平均验证时间"""
-        return statistics.mean(self.validation_ms) if self.validation_ms else 0.0
+        return self.validations_success / self.validations_total if self.validations_total > 0 else 0.0
     
     @property
     def avg_pending_buffer(self) -> float:
@@ -175,20 +268,11 @@ class BinanceMetrics(BaseMetrics):
 class PolymarketMetrics(BaseMetrics):
     """Polymarket特有的监控指标"""
     
-    # 使用 field 定义额外字段
-    window_size: int = field(default=1000, init=False)
-    latency_history: Dict[str, Deque[float]] = field(default_factory=dict, init=False)
-    realtime_stats: Dict[str, MessageStat] = field(default_factory=dict, init=False)
-    
     def __post_init__(self):
         super().__post_init__()
         
-        # 延迟历史窗口
-        self.window_size = 1000
-        self.latency_history = defaultdict(lambda: deque(maxlen=self.window_size))
-        
         # 实时统计
-        self.realtime_stats = {
+        self.message_stats = {
             "book": MessageStat(),
             "last_trade_price": MessageStat(),
             "price_change": MessageStat(),

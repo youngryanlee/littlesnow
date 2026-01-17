@@ -110,25 +110,45 @@ class BaseAdapter(BaseMarketAdapter):
                 adapter_name=self.name,
                 exchange_type=self.exchange_type,
             )  
+        
+    def _update_monitor_stats(self, message_type: str, server_timestamp_ms: int, received_timestamp_ms: int):
 
-    def update_basic_stats(self, latency_ms: Optional[float] = None):
+        latency_ms = received_timestamp_ms - server_timestamp_ms
+        # 记录异常情况，但不修正数据
+        if latency_ms < 0:
+            logger.warning(f"{message_type} 负延迟: {latency_ms}ms (服务器时间可能比本地晚), server_timestamp_ms={server_timestamp_ms}, received_timestamp_ms={received_timestamp_ms}")
+            
+        elif latency_ms > 10000:  # 10秒
+            logger.warning(f"{message_type} 高延迟: {latency_ms}ms (可能网络有问题), server_timestamp_ms={server_timestamp_ms}, received_timestamp_ms={received_timestamp_ms}")
+
+        """ 更新统计 """
+        try:
+            """更新基础统计"""
+            self.update_basic_stats(message_type, latency_ms)
+            
+        except Exception as e:
+            logger.exception(f"更新延迟统计失败: {e}")        
+
+    def update_basic_stats(self, message_type: str, latency_ms: Optional[float] = None):
         """更新基础统计指标"""
         if not hasattr(self, 'monitor') or not self.monitor:
             return
             
         try:
             metrics = self.monitor.get_metrics(self.name)
-            
-            # 更新接收和处理计数
-            metrics.data.messages_received += 1
-            metrics.data.messages_processed += 1
 
-            # 更新订阅列表（如果适配器有这个属性）
+            # 更新订阅列表（只在需要时）
             if hasattr(self, 'subscribed_symbols'):
-                metrics.data.subscribed_symbols = self.subscribed_symbols.copy()
+                metrics.data.subscribed_symbols = list(self.subscribed_symbols)
             
-            # 更新延迟
-            self._record_latency(latency_ms)
+            # 如果有延迟数据，更新统计
+            if latency_ms is not None:
+                timestamp = datetime.now(timezone.utc)
+                metrics.data.add_latency(message_type, latency_ms, timestamp)
+            else:
+                # 只更新计数
+                metrics.data.messages_received += 1
+                metrics.data.messages_processed += 1
                       
         except Exception as e:
             logger.exception(f"更新基础统计失败: {e}")          

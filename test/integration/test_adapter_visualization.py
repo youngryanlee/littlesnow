@@ -488,7 +488,6 @@ class TestAdaptersVisualization:
 # 添加一个快速验证测试
 @pytest.mark.integration
 @pytest.mark.asyncio
-@pytest.mark.quick
 async def test_monitor_quick_validation():
     """快速验证监控器基本功能"""
     from market.monitor.collector import MarketMonitor

@@ -84,18 +84,16 @@ class MarketMonitor:
         
         if metrics.is_binance():
             binance_metrics = metrics.data
-            binance_metrics.validations_total += 1
-            
-            if is_valid:
-                binance_metrics.validations_success += 1
-            else:
-                binance_metrics.validations_failed += 1
+            binance_metrics.validations_total = details['total_verifications']
+            binance_metrics.validations_success = details['passed_verifications']
+            binance_metrics.validations_failed = details['failed_verifications']
+            binance_metrics.validations_warnings = details['warnings']
             
             # 记录验证时间
-            if 'processing_time' in details:
-                binance_metrics.validation_ms.append(details['processing_time'])
-                if len(binance_metrics.validation_ms) > 1000:
-                    binance_metrics.validation_ms.pop(0)
+            if 'last_verification_time' in details:
+                binance_metrics.validation_time.append(details['last_verification_time'])
+                if len(binance_metrics.validation_time) > 1000:
+                    binance_metrics.validation_time.pop(0)
     
     def record_pending_buffer(self, adapter_name: str, buffer_size: int) -> None:
         """记录pending buffer大小（Binance特有）"""
@@ -105,7 +103,7 @@ class MarketMonitor:
         metrics = self.metrics[adapter_name]
         
         if metrics.is_binance():
-            binance_metrics = metrics.specific
+            binance_metrics = metrics.data
             binance_metrics.pending_buffer_sizes.append(buffer_size)
             
             if len(binance_metrics.pending_buffer_sizes) > 1000:
@@ -134,17 +132,16 @@ class MarketMonitor:
                 polymarket_metrics.price_updates += 1
     
     # === 获取监控数据 ===
-    
     def get_summary(self) -> Dict[str, Any]:
-        """获取监控摘要"""
+        """获取监控摘要 - 使用统一统计"""
         summary = {}
         
         for adapter_name, metrics in self.metrics.items():
-            # 获取基础指标
             data = metrics.data
             
+            # 基础摘要 - 所有适配器通用
             base_summary = {
-                'adapter_type': 'unknown',
+                'adapter_type': data.exchange_type.value if hasattr(data.exchange_type, 'value') else str(data.exchange_type),
                 'exchange_type': data.exchange_type,
                 'is_connected': data.is_connected,
                 'connection_errors': data.connection_errors,
@@ -158,8 +155,7 @@ class MarketMonitor:
                 'messages_processed': data.messages_processed,
                 'errors': data.errors,
                 'subscribed_symbols': data.subscribed_symbols,
-                'success_rate': 0.0,  # 默认值
-                'total_validations': 0,  # 默认值
+                'success_rate': 1.0 - data.error_rate,
             }
             
             # Binance特有指标
@@ -167,33 +163,25 @@ class MarketMonitor:
                 base_summary.update({
                     'adapter_type': 'binance',
                     'validation_success_rate': data.validation_success_rate,
-                    'avg_validation_time_ms': data.avg_validation_time,
                     'avg_pending_buffer': data.avg_pending_buffer,
                     'validations_total': data.validations_total,
                     'validations_success': data.validations_success,
                     'validations_failed': data.validations_failed,
-                    'success_rate': data.validation_success_rate,  # 为测试代码提供
-                    'total_validations': data.validations_total,   # 为测试代码提供
+                    'warnings': data.validations_warnings,
                 })
             
             # Polymarket特有指标
             elif metrics.is_polymarket():
-                # 计算Polymarket的成功率（假设消息处理都成功）
-                success_rate = 1.0 - data.error_rate if data.messages_received > 0 else 0.0
-                
                 base_summary.update({
                     'adapter_type': 'polymarket',
-                    'realtime_stats_count': len(data.realtime_stats) if hasattr(data, 'realtime_stats') else 0,
-                    'success_rate': success_rate,  # 为测试代码提供
-                    'total_validations': data.messages_received,  # 为测试代码提供
                 })
-                
-                # 如果有实时统计，添加更多信息
-                if hasattr(data, 'realtime_stats') and data.realtime_stats:
-                    for key, stat in data.realtime_stats.items():
-                        if hasattr(stat, 'count'):
-                            base_summary[f'{key}_count'] = stat.count
-                            base_summary[f'{key}_latency_ewma'] = stat.latency_ewma
+            
+            # 添加详细的消息统计
+            if hasattr(data, 'message_stats'):
+                for key, stat in data.message_stats.items():
+                    if stat.count > 0:
+                        base_summary[f'{key}_count'] = stat.count
+                        base_summary[f'{key}_latency_ewma'] = stat.latency_ewma
             
             summary[adapter_name] = base_summary
         

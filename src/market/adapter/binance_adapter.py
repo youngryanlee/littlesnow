@@ -99,6 +99,7 @@ class BinanceAdapter(BaseAdapter):
             'total_verifications': 0,
             'passed_verifications': 0,
             'failed_verifications': 0,
+            'warnings': 0,
             'last_verification_time': None,
             'last_verification_result': None,
         })
@@ -485,6 +486,9 @@ class BinanceAdapter(BaseAdapter):
         on_message 入口。raw_data 可能是 stream 包装（{stream, data}）或 event 格式（{e: 'depthUpdate', ...}）
         """
         try:
+            current_time = datetime.now(timezone.utc)
+            receive_timestamp_ms = int(current_time.timestamp() * 1000)
+
             # stream 包装
             if 'stream' in raw_data:
                 stream = raw_data['stream']
@@ -504,7 +508,7 @@ class BinanceAdapter(BaseAdapter):
                     self._handle_trade(raw_data)
                 else:
                     logger.debug("Unhandled event type: %s", event_type)
-            elif 'result' in raw_data:
+            elif 'result' in raw_data: # {'result': None, 'id': 1}
                 event_type = raw_data['result']  
                 if event_type is None:
                     pass
@@ -512,6 +516,16 @@ class BinanceAdapter(BaseAdapter):
                     logger.info("Unrecognized message shape from Binance WS: %s", raw_data)
             else:
                 logger.info("Unrecognized message shape from Binance WS: %s", raw_data)
+
+            # 更新监控统计
+            if event_type is not None: # result消息没有时间戳: {'result': None, 'id': 1}
+                server_ts_str = raw_data.get('E')
+                if not server_ts_str:
+                    logger.error(f"raw data received error: {raw_data}")
+                    return
+                server_timestamp_ms = int(server_ts_str)
+                self._update_monitor_stats(event_type, server_timestamp_ms, receive_timestamp_ms)
+
         except Exception as e:
             logger.exception("Error handling raw message: %s", e)
 
@@ -844,216 +858,218 @@ class BinanceAdapter(BaseAdapter):
             # 2. 获取本地订单簿
             local_ob = self.orderbook_snapshots.get(symbol)
             if not local_ob:
-                # 更新统计
-                self._update_verification_stats(symbol, False, {'reason': 'local_orderbook_missing'})
-                return False, {'reason': 'local_orderbook_missing'}
-            
-            # 3. 检查更新ID的正确性（核心验证）
-            # 本地更新ID应该 >= 快照更新ID（因为我们处理了快照之后的更新）
-            update_id_info = {
-                'snapshot_update_id': snapshot_last_update_id,
-                'local_update_id': local_last_update_id,
-                'update_id_diff': local_last_update_id - snapshot_last_update_id
-            }
-            
-            # 关键验证点1：本地应该包含快照之后的所有更新
-            if local_last_update_id < snapshot_last_update_id:
-                # 本地缺少快照之后的更新，这是严重问题
-                return False, {
-                    'reason': 'missing_updates_after_snapshot',
-                    'message': f'本地更新ID({local_last_update_id})小于快照更新ID({snapshot_last_update_id})，缺少{snapshot_last_update_id - local_last_update_id}个更新',
-                    **update_id_info
+                is_valid = False
+                result = {'reason': 'local_orderbook_missing'}
+            else:
+
+                # 3. 检查更新ID的正确性（核心验证）
+                # 本地更新ID应该 >= 快照更新ID（因为我们处理了快照之后的更新）
+                update_id_info = {
+                    'snapshot_update_id': snapshot_last_update_id,
+                    'local_update_id': local_last_update_id,
+                    'update_id_diff': local_last_update_id - snapshot_last_update_id
                 }
-            
-            # 4. 深度交叉验证（使用更精确的方法）
-            snapshot_bids = {Decimal(b[0]): Decimal(b[1]) for b in snapshot.get('bids', [])}
-            snapshot_asks = {Decimal(a[0]): Decimal(a[1]) for a in snapshot.get('asks', [])}
-            
-            # 5. 获取本地订单簿的前N档（深度100）
-            local_bids = {}
-            local_asks = {}
-            
-            for bid in local_ob.bids[:100]:
-                local_bids[bid.price] = bid.quantity
-            for ask in local_ob.asks[:100]:
-                local_asks[ask.price] = ask.quantity
-
-            logger.debug(f" 订单簿验证: {symbol} (本地bids: {local_bids}, 快照bids: {snapshot_bids})")    
-            logger.debug(f" 订单簿验证: {symbol} (本地asks: {local_asks}, 快照asks: {snapshot_asks})")    
-            
-            # 检查差异
-            differences = []
-            warnings = []
-            critical_issues = []
-            
-            # 关键验证点2： 验证买卖盘交叉（基本规则）
-            if local_ob.bids and local_ob.asks:
-                best_bid = local_ob.bids[0].price
-                best_ask = local_ob.asks[0].price
-                if best_bid >= best_ask:
-                    critical_issues.append(f"买卖盘交叉: 最佳买价 {best_bid} >= 最佳卖价 {best_ask}")
-            
-            # 关键验证点3： 验证价格单调性
-            for i in range(len(local_ob.bids) - 1):
-                if local_ob.bids[i].price <= local_ob.bids[i + 1].price:
-                    critical_issues.append(f"买盘价格非单调递减: {local_ob.bids[i].price} <= {local_ob.bids[i + 1].price}")
-                    break
-            
-            for i in range(len(local_ob.asks) - 1):
-                if local_ob.asks[i].price >= local_ob.asks[i + 1].price:
-                    critical_issues.append(f"卖盘价格非单调递增: {local_ob.asks[i].price} >= {local_ob.asks[i + 1].price}")
-                    break
-            
-            # 6. 与快照的精确比较（使用Binance的增量更新逻辑）
-            # Binance的更新机制保证：如果我们的更新ID >= 快照更新ID，并且正确处理了所有更新，
-            # 那么本地订单簿应该是正确的。但我们可以验证一些关键点：
-            
-            # 检查pending buffer状态
-            pending_updates = len(self.pending_updates.get(symbol, []))
-            
-            # 关键验证点4：如果pending buffer过长，说明数据处理有问题
-            if pending_updates > self.PENDING_RESYNC_THRESHOLD:
-                critical_issues.append(f"pending buffer过长: {pending_updates}个更新等待处理")
-            
-            # 关键验证点5：验证数据的时间戳合理性
-            if hasattr(local_ob, 'server_timestamp'):
-                current_time = int(time.time() * 1000)
-                time_diff = current_time - local_ob.server_timestamp
                 
-                if time_diff > 60000:  # 超过1分钟
-                    critical_issues.append(f"数据延迟过大: {time_diff}ms")
-                elif time_diff > 10000:  # 超过10秒
-                    warnings.append(f"数据有一定延迟: {time_diff}ms")  
+                # 关键验证点1：本地应该包含快照之后的所有更新
+                if local_last_update_id < snapshot_last_update_id:
+                    # 本地缺少快照之后的更新，这是严重问题
+                    is_valid = False
+                    result = {
+                        'reason': 'missing_updates_after_snapshot',
+                        'message': f'本地更新ID({local_last_update_id})小于快照更新ID({snapshot_last_update_id})，缺少{snapshot_last_update_id - local_last_update_id}个更新',
+                        **update_id_info
+                    }
+                else:
+                
+                    # 4. 深度交叉验证（使用更精确的方法）
+                    snapshot_bids = {Decimal(b[0]): Decimal(b[1]) for b in snapshot.get('bids', [])}
+                    snapshot_asks = {Decimal(a[0]): Decimal(a[1]) for a in snapshot.get('asks', [])}
+                    
+                    # 5. 获取本地订单簿的前N档（深度100）
+                    local_bids = {}
+                    local_asks = {}
+                    
+                    for bid in local_ob.bids[:100]:
+                        local_bids[bid.price] = bid.quantity
+                    for ask in local_ob.asks[:100]:
+                        local_asks[ask.price] = ask.quantity
 
-            # 关键验证点6：策略关键一致性（price only）
-            # ⚠️ 只有在本地与快照几乎同步时才检查最优价一致性
-            PRICE_CHECK_MAX_UPDATE_DIFF = 5  # <= 5 个 update 认为是“同步”
-            update_id_diff = update_id_info['update_id_diff']
+                    logger.debug(f" 订单簿验证: {symbol} (本地bids: {local_bids}, 快照bids: {snapshot_bids})")    
+                    logger.debug(f" 订单簿验证: {symbol} (本地asks: {local_asks}, 快照asks: {snapshot_asks})")    
+                    
+                    # 检查差异
+                    differences = []
+                    warnings = []
+                    critical_issues = []
+                    
+                    # 关键验证点2： 验证买卖盘交叉（基本规则）
+                    if local_ob.bids and local_ob.asks:
+                        best_bid = local_ob.bids[0].price
+                        best_ask = local_ob.asks[0].price
+                        if best_bid >= best_ask:
+                            critical_issues.append(f"买卖盘交叉: 最佳买价 {best_bid} >= 最佳卖价 {best_ask}")
+                    
+                    # 关键验证点3： 验证价格单调性
+                    for i in range(len(local_ob.bids) - 1):
+                        if local_ob.bids[i].price <= local_ob.bids[i + 1].price:
+                            critical_issues.append(f"买盘价格非单调递减: {local_ob.bids[i].price} <= {local_ob.bids[i + 1].price}")
+                            break
+                    
+                    for i in range(len(local_ob.asks) - 1):
+                        if local_ob.asks[i].price >= local_ob.asks[i + 1].price:
+                            critical_issues.append(f"卖盘价格非单调递增: {local_ob.asks[i].price} >= {local_ob.asks[i + 1].price}")
+                            break
+                    
+                    # 6. 与快照的精确比较（使用Binance的增量更新逻辑）
+                    # Binance的更新机制保证：如果我们的更新ID >= 快照更新ID，并且正确处理了所有更新，
+                    # 那么本地订单簿应该是正确的。但我们可以验证一些关键点：
+                    
+                    # 检查pending buffer状态
+                    pending_updates = len(self.pending_updates.get(symbol, []))
+                    
+                    # 关键验证点4：如果pending buffer过长，说明数据处理有问题
+                    if pending_updates > self.PENDING_RESYNC_THRESHOLD:
+                        critical_issues.append(f"pending buffer过长: {pending_updates}个更新等待处理")
+                    
+                    # 关键验证点5：验证数据的时间戳合理性
+                    if hasattr(local_ob, 'server_timestamp'):
+                        current_time = int(time.time() * 1000)
+                        time_diff = current_time - local_ob.server_timestamp
+                        
+                        if time_diff > 60000:  # 超过1分钟
+                            critical_issues.append(f"数据延迟过大: {time_diff}ms")
+                        elif time_diff > 10000:  # 超过10秒
+                            warnings.append(f"数据有一定延迟: {time_diff}ms")  
 
-            price_mismatch = False
-            if abs(update_id_diff) <= PRICE_CHECK_MAX_UPDATE_DIFF:
-                if snapshot_bids and local_ob.bids:
-                    if local_ob.bids[0].price != max(snapshot_bids.keys()):
-                        price_mismatch = True
+                    # 关键验证点6：策略关键一致性（price only）
+                    # ⚠️ 只有在本地与快照几乎同步时才检查最优价一致性
+                    PRICE_CHECK_MAX_UPDATE_DIFF = 5  # <= 5 个 update 认为是“同步”
+                    update_id_diff = update_id_info['update_id_diff']
 
-                if snapshot_asks and local_ob.asks:
-                    if local_ob.asks[0].price != min(snapshot_asks.keys()):
-                        price_mismatch = True
+                    price_mismatch = False
+                    if abs(update_id_diff) <= PRICE_CHECK_MAX_UPDATE_DIFF:
+                        if snapshot_bids and local_ob.bids:
+                            if local_ob.bids[0].price != max(snapshot_bids.keys()):
+                                price_mismatch = True
 
-                if price_mismatch:
-                    critical_issues.append("最优价位与快照不一致（同步状态下）")
-            else:
-                logger.info(
-                    f"跳过最优价一致性校验：local 比 snapshot 新 {update_id_diff} 个更新"
-                )    
+                        if snapshot_asks and local_ob.asks:
+                            if local_ob.asks[0].price != min(snapshot_asks.keys()):
+                                price_mismatch = True
 
-            # ====== 下面验证辅助信息 ======
-            # 7. 数量一致性检查（只检查存在的数据）
-            # 对于快照中的每个价格档位，如果本地也有，检查数量是否匹配
-            # 8. 数量一致性检查
-            matched_bids = 0
-            matched_asks = 0
-            checked_prices = set()
-            MAX_ACCEPTABLE_QTY_DIFF = tolerance * 100          # 0.1%
-            MAX_WARNING_QTY_DIFF = tolerance * 100 * 5         # 0.5%
+                        if price_mismatch:
+                            critical_issues.append("最优价位与快照不一致（同步状态下）")
+                    else:
+                        logger.info(
+                            f"跳过最优价一致性校验：local 比 snapshot 新 {update_id_diff} 个更新"
+                        )    
 
-            # 根据更新ID差异调整期望匹配率
-            if update_id_diff == 0:
-                EXPECTED_MATCH_RATE = 0.8  # 80%
-            elif update_id_diff < 100:
-                EXPECTED_MATCH_RATE = 0.6  # 60%
-            else:
-                EXPECTED_MATCH_RATE = 0.4  # 40%
+                    # ====== 下面验证辅助信息 ======
+                    # 7. 数量一致性检查（只检查存在的数据）
+                    # 对于快照中的每个价格档位，如果本地也有，检查数量是否匹配
+                    # 8. 数量一致性检查
+                    matched_bids = 0
+                    matched_asks = 0
+                    checked_prices = set()
+                    MAX_ACCEPTABLE_QTY_DIFF = tolerance * 100          # 0.1%
+                    MAX_WARNING_QTY_DIFF = tolerance * 100 * 5         # 0.5%
 
-            # 检查本地买盘档位是否在快照中
-            for local_price, local_qty in local_bids.items():
-                snapshot_qty = snapshot_bids.get(local_price)
-                if snapshot_qty is not None:
-                    matched_bids += 1
-                    checked_prices.add(local_price)
-                    if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
-                        qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
-                        if qty_diff_pct > MAX_WARNING_QTY_DIFF:
-                            warnings.append(f"bid {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
-                        elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
-                            differences.append(f"bid {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                    # 根据更新ID差异调整期望匹配率
+                    if update_id_diff == 0:
+                        EXPECTED_MATCH_RATE = 0.8  # 80%
+                    elif update_id_diff < 100:
+                        EXPECTED_MATCH_RATE = 0.6  # 60%
+                    else:
+                        EXPECTED_MATCH_RATE = 0.4  # 40%
 
-            # 检查本地卖盘档位是否在快照中
-            for local_price, local_qty in local_asks.items():
-                snapshot_qty = snapshot_asks.get(local_price)
-                if snapshot_qty is not None:
-                    matched_asks += 1
-                    checked_prices.add(local_price)
-                    if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
-                        qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
-                        if qty_diff_pct > MAX_WARNING_QTY_DIFF:
-                            warnings.append(f"ask {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
-                        elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
-                            differences.append(f"ask {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                    # 检查本地买盘档位是否在快照中
+                    for local_price, local_qty in local_bids.items():
+                        snapshot_qty = snapshot_bids.get(local_price)
+                        if snapshot_qty is not None:
+                            matched_bids += 1
+                            checked_prices.add(local_price)
+                            if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
+                                qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
+                                if qty_diff_pct > MAX_WARNING_QTY_DIFF:
+                                    warnings.append(f"bid {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                                elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
+                                    differences.append(f"bid {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
 
-            # 9. 验证匹配的价格档位数量
-            matched_levels = len(checked_prices)
-            total_snapshot_levels = len(snapshot_bids) + len(snapshot_asks)
-            total_local_levels = len(local_bids) + len(local_asks)
+                    # 检查本地卖盘档位是否在快照中
+                    for local_price, local_qty in local_asks.items():
+                        snapshot_qty = snapshot_asks.get(local_price)
+                        if snapshot_qty is not None:
+                            matched_asks += 1
+                            checked_prices.add(local_price)
+                            if snapshot_qty != Decimal('0') and local_qty != Decimal('0'):
+                                qty_diff_pct = abs(float(snapshot_qty - local_qty) / float(snapshot_qty)) * 100
+                                if qty_diff_pct > MAX_WARNING_QTY_DIFF:
+                                    warnings.append(f"ask {local_price}: 数量严重差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
+                                elif qty_diff_pct > MAX_ACCEPTABLE_QTY_DIFF:
+                                    differences.append(f"ask {local_price}: 数量轻微差异 {qty_diff_pct:.2f}% (快照: {snapshot_qty}, 本地: {local_qty})")
 
-            logger.info(f"匹配统计: 本地{total_local_levels}档, 匹配{matched_levels}档, 快照{total_snapshot_levels}档")
-            logger.info(f"买盘匹配: {matched_bids}/{len(local_bids)}, 卖盘匹配: {matched_asks}/{len(local_asks)}")
-            logger.info(f"更新ID差异: {update_id_diff}")
+                    # 9. 验证匹配的价格档位数量
+                    matched_levels = len(checked_prices)
+                    total_snapshot_levels = len(snapshot_bids) + len(snapshot_asks)
+                    total_local_levels = len(local_bids) + len(local_asks)
 
-            # 检查匹配率
-            if len(local_bids) > 0:
-                bid_match_rate = matched_bids / len(local_bids)
-                if bid_match_rate < EXPECTED_MATCH_RATE:
-                    differences.append(f"买盘匹配率{bid_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
-                    if bid_match_rate < 0.2:
-                        warnings.append(f"买盘匹配严重不足: {bid_match_rate:.1%}")
+                    logger.info(f"匹配统计: 本地{total_local_levels}档, 匹配{matched_levels}档, 快照{total_snapshot_levels}档")
+                    logger.info(f"买盘匹配: {matched_bids}/{len(local_bids)}, 卖盘匹配: {matched_asks}/{len(local_asks)}")
+                    logger.info(f"更新ID差异: {update_id_diff}")
 
-            if len(local_asks) > 0:
-                ask_match_rate = matched_asks / len(local_asks)
-                if ask_match_rate < EXPECTED_MATCH_RATE:
-                    differences.append(f"卖盘匹配率{ask_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
-                    if ask_match_rate < 0.2:
-                        warnings.append(f"卖盘匹配严重不足: {ask_match_rate:.1%}")
+                    # 检查匹配率
+                    if len(local_bids) > 0:
+                        bid_match_rate = matched_bids / len(local_bids)
+                        if bid_match_rate < EXPECTED_MATCH_RATE:
+                            differences.append(f"买盘匹配率{bid_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
+                            if bid_match_rate < 0.2:
+                                warnings.append(f"买盘匹配严重不足: {bid_match_rate:.1%}")
 
-            # 检查快照数据完整性
-            if total_snapshot_levels < 200:  # 预期是200档（100买+100卖）
-                warnings.append(f"快照数据不完整: 只获取了{total_snapshot_levels}档（预期200档）")
-                if total_snapshot_levels < 100:
-                    logger.warning("快照数据严重不足，验证可能不可靠")
+                    if len(local_asks) > 0:
+                        ask_match_rate = matched_asks / len(local_asks)
+                        if ask_match_rate < EXPECTED_MATCH_RATE:
+                            differences.append(f"卖盘匹配率{ask_match_rate:.1%}低于预期{EXPECTED_MATCH_RATE:.0%}")
+                            if ask_match_rate < 0.2:
+                                warnings.append(f"卖盘匹配严重不足: {ask_match_rate:.1%}")
 
-            
-            # 10. 严重性判断
-            # 根据更新ID差异调整验证严格度
-            update_id_diff = update_id_info['update_id_diff']
-            
-            if update_id_diff > 0:
-                # 本地数据比快照新，允许数量差异（这是正常的市场变化）
-                # 只检查是否有严重问题，不检查普通数量差异
-                is_valid = len(critical_issues) == 0   
-                logger.info(f"本地数据比快照新 {update_id_diff} 个更新，允许数量差异")
-            else:
-                # 本地数据与快照同步，应该严格检查
-                is_valid = len(critical_issues) == 0 and len(warnings) == 0
+                    # 检查快照数据完整性
+                    if total_snapshot_levels < 200:  # 预期是200档（100买+100卖）
+                        warnings.append(f"快照数据不完整: 只获取了{total_snapshot_levels}档（预期200档）")
+                        if total_snapshot_levels < 100:
+                            logger.warning("快照数据严重不足，验证可能不可靠")
 
-            # 构建结果
-            result = {
-                'reason': 'verification_completed',
-                'is_valid': is_valid,
-                'critical_issues': critical_issues,
-                'differences': differences,
-                'warnings': warnings,
-                'update_id_info': update_id_info,
-                'pending_updates': pending_updates,
-                'local_bids_count': len(local_bids),
-                'local_asks_count': len(local_asks),
-                'snapshot_bids_count': len(snapshot_bids),
-                'snapshot_asks_count': len(snapshot_asks),
-                'matched_price_levels': matched_levels,
-                'data_timestamp': local_ob.server_timestamp if hasattr(local_ob, 'server_timestamp') else None,
-                'snapshot_update_id': snapshot_last_update_id,
-                'local_update_id': local_last_update_id,
-                'local_data_newer': update_id_diff > 0,
-            }    
+                    
+                    # 10. 严重性判断
+                    # 根据更新ID差异调整验证严格度
+                    update_id_diff = update_id_info['update_id_diff']
+                    
+                    if update_id_diff > 0:
+                        # 本地数据比快照新，允许数量差异（这是正常的市场变化）
+                        # 只检查是否有严重问题，不检查普通数量差异
+                        is_valid = len(critical_issues) == 0   
+                        logger.info(f"本地数据比快照新 {update_id_diff} 个更新，允许数量差异")
+                    else:
+                        # 本地数据与快照同步，应该严格检查
+                        is_valid = len(critical_issues) == 0 and len(warnings) == 0
+
+                    # 构建结果
+                    result = {
+                        'reason': 'verification_completed',
+                        'is_valid': is_valid,
+                        'critical_issues': critical_issues,
+                        'differences': differences,
+                        'warnings': warnings,
+                        'update_id_info': update_id_info,
+                        'pending_updates': pending_updates,
+                        'local_bids_count': len(local_bids),
+                        'local_asks_count': len(local_asks),
+                        'snapshot_bids_count': len(snapshot_bids),
+                        'snapshot_asks_count': len(snapshot_asks),
+                        'matched_price_levels': matched_levels,
+                        'data_timestamp': local_ob.server_timestamp if hasattr(local_ob, 'server_timestamp') else None,
+                        'snapshot_update_id': snapshot_last_update_id,
+                        'local_update_id': local_last_update_id,
+                        'local_data_newer': update_id_diff > 0,
+                    }    
 
             # 更新验证统计
             self._update_verification_stats(symbol, is_valid, result)
@@ -1120,6 +1136,7 @@ class BinanceAdapter(BaseAdapter):
                 'total_verifications': 0,
                 'passed_verifications': 0,
                 'failed_verifications': 0,
+                'warnings': 0,
                 'last_verification_time': None,
                 'last_verification_result': None,
             }
@@ -1131,7 +1148,8 @@ class BinanceAdapter(BaseAdapter):
             stats['passed_verifications'] += 1
         else:
             stats['failed_verifications'] += 1
-        
+
+        stats['warnings'] += len(details['warnings'])
         stats['last_verification_time'] = time.time()
         stats['last_verification_result'] = details
         
@@ -1149,6 +1167,7 @@ class BinanceAdapter(BaseAdapter):
             total = stats.get('total_verifications', 0)
             passed = stats.get('passed_verifications', 0)
             failed = stats.get('failed_verifications', 0)
+            warnings = stats.get('warnings', 0)
             
             # 计算成功率
             if total > 0:
@@ -1164,6 +1183,7 @@ class BinanceAdapter(BaseAdapter):
                 'passed_verifications': passed,
                 'failed_verifications': failed,
                 'success_rate': f"{success_rate:.2%}",
+                'warnings': warnings,
                 'last_verification_time': stats.get('last_verification_time'),
                 'last_verification_result': stats.get('last_verification_result', {}).get('reason'),
             }
@@ -1180,6 +1200,7 @@ class BinanceAdapter(BaseAdapter):
                 total_verifications += stats.get('total_verifications', 0)
                 total_passed += stats.get('passed_verifications', 0)
                 total_failed += stats.get('failed_verifications', 0)
+                total_warnings += stats.get('warnings', 0)
             
             # 计算总成功率
             if total_verifications > 0:
@@ -1193,6 +1214,7 @@ class BinanceAdapter(BaseAdapter):
                 'total_passed': total_passed,
                 'total_failed': total_failed,
                 'overall_success_rate': f"{overall_success_rate:.2%}",
+                'total_warnings': total_warnings,
                 'verification_enabled': self._verification_enabled,
                 'running_tasks': len(self._verification_tasks),
                 'symbols': all_symbols,
@@ -1209,12 +1231,14 @@ class BinanceAdapter(BaseAdapter):
             if total > 0:
                 passed = stats.get('passed_verifications', 0)
                 failed = stats.get('failed_verifications', 0)
+                warnings = stats.get('warnings', 0)
                 success_rate = passed / total
                 
                 print(f"{symbol}:")
                 print(f"  总计验证: {total}")
                 print(f"  通过: {passed} ({success_rate:.2%})")
                 print(f"  失败: {failed}")
+                print(f"  警告: {warnings}")
                 print(f"  最后验证时间: {stats.get('last_verification_time')}")
                 print(f"  最后结果: {stats.get('last_verification_result', {}).get('reason')}")
                 print()
