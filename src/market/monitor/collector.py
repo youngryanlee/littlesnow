@@ -142,7 +142,6 @@ class MarketMonitor:
             # 基础摘要 - 所有适配器通用
             base_summary = {
                 'adapter_type': data.exchange_type.value if hasattr(data.exchange_type, 'value') else str(data.exchange_type),
-                'exchange_type': data.exchange_type,
                 'is_connected': data.is_connected,
                 'connection_errors': data.connection_errors,
                 'avg_latency_ms': data.avg_latency,

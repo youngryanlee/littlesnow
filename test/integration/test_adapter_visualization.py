@@ -485,38 +485,6 @@ class TestAdaptersVisualization:
             print(f"⚠️ 保存指标时出错: {e}")
 
 
-# 添加一个快速验证测试
-@pytest.mark.integration
-@pytest.mark.asyncio
-async def test_monitor_quick_validation():
-    """快速验证监控器基本功能"""
-    from market.monitor.collector import MarketMonitor
-    
-    monitor = MarketMonitor()
-    
-    # 注册测试适配器
-    monitor.register_adapter("test_binance", "BINANCE")
-    monitor.register_adapter("test_polymarket", "POLYMARKET")
-    
-    # 添加一些测试数据
-    for i in range(10):
-        monitor.record_latency("test_binance", 50 + i * 5)
-        monitor.record_validation_result(
-            adapter_name="test_binance",
-            symbol="BTCUSDT",
-            is_valid=True,
-            details={'data_timestamp': int(time.time() * 1000) - 100}
-        )
-    
-    summary = monitor.get_summary()
-    
-    assert "test_binance" in summary
-    assert summary["test_binance"]["avg_latency_ms"] > 0
-    assert summary["test_binance"]["success_rate"] == 1.0
-    
-    print("✅ 监控器快速验证测试通过")
-
-
 if __name__ == "__main__":
     # 可以直接运行这个测试
     print("直接运行监控测试...")

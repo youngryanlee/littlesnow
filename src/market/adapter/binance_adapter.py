@@ -1,4 +1,4 @@
-# binance_adapter.py
+# src/market/adapter/binance_adapter.py
 import asyncio
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -1149,7 +1149,8 @@ class BinanceAdapter(BaseAdapter):
         else:
             stats['failed_verifications'] += 1
 
-        stats['warnings'] += len(details['warnings'])
+        warnings_list = details.get('warnings', [])
+        stats['warnings'] += len(warnings_list)
         stats['last_verification_time'] = time.time()
         stats['last_verification_result'] = details
         

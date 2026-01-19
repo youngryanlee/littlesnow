@@ -680,12 +680,12 @@ class PolymarketAdapter(BaseAdapter):
             message_type = raw_data.get('event_type')
             market_id = raw_data.get('market', None)
             asset_id = raw_data.get('asset_id', None)
-            print("========>>>>>>>>message_type: ", message_type)
-            print("========>>>>>>>>current_time:", current_time, "receive_timestamp_ms: ", receive_timestamp_ms)
-            st = int(raw_data.get('timestamp'))
-            dt = datetime.fromtimestamp(st / 1000, tz=timezone.utc)
-            print("========>>>>>>>>server_time:", dt, "server_timestamp_ms: ", st)
-            print("========>>>>>>>>delta: ", current_time - dt)
+            # print("========>>>>>>>>message_type: ", message_type)
+            # print("========>>>>>>>>current_time:", current_time, "receive_timestamp_ms: ", receive_timestamp_ms)
+            # st = int(raw_data.get('timestamp'))
+            # dt = datetime.fromtimestamp(st / 1000, tz=timezone.utc)
+            # print("========>>>>>>>>server_time:", dt, "server_timestamp_ms: ", st)
+            # print("========>>>>>>>>delta: ", current_time - dt)
             
             # 更新监控统计
             server_ts_str = raw_data.get('timestamp')
