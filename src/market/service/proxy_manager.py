@@ -1,10 +1,11 @@
 # src/market/service/proxy_manager.py
 import os
 import subprocess
-import logging
 from typing import Optional
 
-logger = logging.getLogger(__name__)
+from logger.logger import get_logger
+
+logger = get_logger()
 
 class ProxyManager:
     """通用的代理管理器"""
@@ -26,10 +27,10 @@ class ProxyManager:
         try:
             system_proxy = ProxyManager._get_macos_system_proxy()
             if system_proxy:
-                logger.info(f"检测到系统代理: {system_proxy}")
+                logger.debug(f"检测到系统代理: {system_proxy}")
                 return system_proxy
         except Exception as e:
-            logger.debug(f"系统代理检测失败: {e}")
+            logger.exception(f"系统代理检测失败: {e}")
         
         logger.debug("未检测到代理配置")
         return None

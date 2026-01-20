@@ -1,4 +1,5 @@
-#!/usr/bin/env python3#!/usr/bin/env python3
+# tests/performance/test_adapter_performance.py
+#!/usr/bin/env python3
 """
 增强版集成压力测试脚本 - 结合两个版本的优点
 """
@@ -17,9 +18,13 @@ import time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from market.monitor.service import MonitorService
+from market.monitor.collector import MarketMonitor
+from market.adapter.binance_adapter import BinanceAdapter
+from market.adapter.polymarket_adapter import PolymarketAdapter
+from market.service.ws_manager import WebSocketManager
 
 class StressTest:
-    """增强版压力测试 - 结合自动化与详细记录"""
+    """增强版压力测试 - 正确的数据流"""
     
     def __init__(self, duration_hours: float = 1.0, auto_start_websocket: bool = True):
         self.duration_hours = duration_hours
@@ -43,19 +48,36 @@ class StressTest:
         )
         self.logger = logging.getLogger(__name__)
         
-        # 创建监控服务
-        self.monitor = MonitorService(
+        # 创建监控器（数据收集器）
+        self.monitor = MarketMonitor()
+        
+        # 创建适配器并设置监控器
+        self.binance_adapter = BinanceAdapter()
+        self.polymarket_adapter = PolymarketAdapter()
+        
+        # 设置监控器
+        self.binance_adapter.set_monitor(self.monitor)
+        self.polymarket_adapter.set_monitor(self.monitor)
+        
+        # 注册适配器到监控器
+        self.monitor.register_adapter('binance', self.binance_adapter)
+        self.monitor.register_adapter('polymarket', self.polymarket_adapter)
+        
+        # 创建WebSocket管理器（用于市场数据）
+        self.ws_manager = WebSocketManager()
+        self.ws_manager.register_adapter('binance', self.binance_adapter)
+        self.ws_manager.register_adapter('polymarket', self.polymarket_adapter)
+        
+        # 创建监控服务（只负责显示）
+        self.monitor_service = MonitorService(
             host="0.0.0.0",
             port=8000,
-            config={
-                'binance_symbols': ['BTCUSDT', 'ETHUSDT'],
-                'polymarket_market_ids': None,
-                'update_interval': 1.0,
-                'max_history': 1000
-            },
             auto_start_websocket=auto_start_websocket,
             open_browser=True
         )
+        
+        # 传递监控器到监控服务
+        self.monitor_service.set_monitor(self.monitor)
         
         # 状态跟踪
         self.stats_collection = []
@@ -90,7 +112,7 @@ class StressTest:
     
     async def _display_progress(self):
         """显示测试进度"""
-        while self.is_running and self.monitor.is_running:
+        while self.is_running and self.monitor_service.is_running:
             try:
                 current_time = time.time()
                 elapsed = current_time - self.start_time
@@ -102,7 +124,7 @@ class StressTest:
                     remaining_str = self._format_time(total_seconds - elapsed)
                     
                     # 获取当前指标
-                    metrics = self.monitor._get_current_metrics()
+                    metrics = self.monitor.get_summary()
                     
                     # 构建状态字符串
                     status_parts = []
@@ -120,7 +142,7 @@ class StressTest:
                 
                 # 每30秒保存一次数据
                 if int(current_time) % 30 == 0:
-                    summary = self.monitor._get_current_metrics()
+                    summary = self.monitor.get_summary()
                     current_stats = {
                         'timestamp': datetime.now().isoformat(),
                         'elapsed_hours': elapsed / 3600,
@@ -136,6 +158,33 @@ class StressTest:
             except Exception as e:
                 self.logger.error(f"进度显示出错: {e}")
                 await asyncio.sleep(5)
+    
+    async def _subscribe_data(self):
+        """订阅数据源"""
+        try:
+            # 订阅Binance
+            symbols = ['BTCUSDT', 'ETHUSDT']
+            await self.binance_adapter.subscribe(symbols)
+            self.logger.info(f"✅ Binance订阅完成: {symbols}")
+            
+            # 订阅Polymarket
+            try:
+                market_ids = await self.polymarket_adapter.get_active_market_id(3)
+                if not market_ids:
+                    market_ids = ["0x14bb1f6af987e0c27e9d6bb538f13a7cfeb0ca2b"]  # 备用市场ID
+                
+                if market_ids:
+                    await self.polymarket_adapter.subscribe(market_ids)
+                    self.logger.info(f"✅ Polymarket订阅完成: {market_ids}")
+                else:
+                    self.logger.error("❌ 无法订阅Polymarket: 未找到市场ID")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ Polymarket订阅失败: {e}")
+                
+        except Exception as e:
+            self.logger.error(f"❌ 订阅数据失败: {e}")
+            raise
     
     async def run(self):
         """运行压力测试"""
@@ -155,14 +204,23 @@ class StressTest:
         self.logger.info(f"预计结束时间: {self.end_time}")
         
         try:
-            # 启动监控服务
-            self.logger.info("启动监控服务...")
-            success = await self.monitor.start_monitoring(
+            # 启动市场数据连接
+            self.logger.info("启动市场数据连接...")
+            await self.ws_manager.start()
+            await asyncio.sleep(2)
+            
+            # 订阅数据
+            self.logger.info("订阅数据源...")
+            await self._subscribe_data()
+            
+            # 启动监控显示服务
+            self.logger.info("启动监控显示服务...")
+            success = await self.monitor_service.start_monitoring(
                 duration_hours=self.duration_hours
             )
             
             if not success:
-                self.logger.error("❌ 启动监控失败")
+                self.logger.error("❌ 启动监控显示服务失败")
                 return
             
             self.is_running = True
@@ -176,7 +234,7 @@ class StressTest:
             
             # 等待测试完成
             try:
-                while self.is_running and self.monitor.is_running:
+                while self.is_running and self.monitor_service.is_running:
                     await asyncio.sleep(1)
             except KeyboardInterrupt:
                 self.logger.info("\n测试被用户中断")
@@ -241,8 +299,13 @@ class StressTest:
     
     async def stop(self):
         """停止测试"""
-        if hasattr(self.monitor, 'is_running') and self.monitor.is_running:
-            await self.monitor.stop_monitoring()
+        # 停止市场数据连接
+        if hasattr(self, 'ws_manager'):
+            await self.ws_manager.stop()
+        
+        # 停止监控显示服务
+        if hasattr(self, 'monitor_service') and self.monitor_service.is_running:
+            await self.monitor_service.stop_monitoring()
         
         self.is_running = False
         self.logger.info("✅ 测试已停止")
@@ -291,7 +354,7 @@ async def main():
     
     # 覆盖open_browser设置
     if args.no_browser:
-        test.monitor.open_browser = False
+        test.monitor_service.open_browser = False
     
     await test.run()
 

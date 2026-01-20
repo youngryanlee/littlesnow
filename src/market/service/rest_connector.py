@@ -1,11 +1,11 @@
 # src/market/service/rest_connector.py
 import aiohttp
-import asyncio
-import logging
 from typing import Optional, Dict, Any
 from .proxy_manager import ProxyManager
 
-logger = logging.getLogger(__name__)
+from logger.logger import get_logger
+
+logger = get_logger()
 
 class RESTConnector:
     """通用的 REST API 连接器 - 内部自动处理代理配置"""
@@ -38,7 +38,7 @@ class RESTConnector:
             connector_kwargs = {}
             if self.proxy and self.proxy.startswith(('http://', 'https://')):
                 connector_kwargs['proxy'] = self.proxy
-                logger.info(f"[{self.name}] 使用代理: {self.proxy}")
+                logger.debug(f"[{self.name}] 使用代理: {self.proxy}")
             
             self.session = aiohttp.ClientSession(
                 timeout=self.timeout,

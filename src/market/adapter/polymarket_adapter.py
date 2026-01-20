@@ -846,7 +846,7 @@ class PolymarketAdapter(BaseAdapter):
             )
             if market_data:
                 self._notify_callbacks(market_data)
-                logger.info(f"📈 最新价更新 {asset_id}: {side} {size} @ {price}")
+                logger.debug(f"📈 最新价更新 {asset_id}: {side} {size} @ {price}")
                 
         except Exception as e:
             logger.error(f"❌ 处理最新成交价失败: {e}")    

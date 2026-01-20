@@ -105,7 +105,7 @@ class WebSocketConnector:
         """发送 JSON 数据"""
         if self.ws and not self.ws.closed:
             await self.ws.send_json(data)
-            logger.info(f"[{self.name}] Sent JSON message: {data}: {self.ws}")
+            logger.debug(f"[{self.name}] Sent JSON message: {data}: {self.ws}")
         else:
             logger.warning(f"[{self.name}] Cannot send message, WebSocket is not connected: {self.ws}")
             
@@ -113,7 +113,7 @@ class WebSocketConnector:
         """发送文本数据"""
         if self.ws and not self.ws.closed:
             await self.ws.send_str(text)
-            logger.info(f"[{self.name}] Sent text message: {text}: {self.ws}")
+            logger.debug(f"[{self.name}] Sent text message: {text}: {self.ws}")
         else:
             logger.warning(f"[{self.name}] Cannot send message: {text}, WebSocket is not connected: {self.ws}")
             

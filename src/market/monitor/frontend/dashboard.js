@@ -400,31 +400,146 @@ class MarketDashboard {
                 '<i class="bi bi-check-circle-fill text-success"></i>' : 
                 '<i class="bi bi-x-circle-fill text-danger"></i>';
             
-            const card = `
-                <div class="col-md-3 mb-3">
-                    <div class="card h-100">
-                        <div class="card-header">
-                            <h6 class="mb-0">${adapter.toUpperCase()}</h6>
+            // 通用指标
+            const commonMetrics = `
+                <div class="row mb-2">
+                    <div class="col-6 text-center">
+                        <h5 class="mb-1">${successRate.toFixed(1)}%</h5>
+                        <small class="text-muted">成功率</small>
+                    </div>
+                    <div class="col-6 text-center">
+                        <h5 class="mb-1">${messages}</h5>
+                        <small class="text-muted">消息数</small>
+                    </div>
+                </div>
+            `;
+            
+            // 适配器特定指标
+            let specificMetrics = '';
+            
+            // Binance 特定指标
+            if (adapter === 'binance' || metrics.adapter_type === 'binance') {
+                const tradeCount = metrics.trade_count || 0;
+                const depthUpdateCount = metrics.depthUpdate_count || 0;
+                const validations = metrics.validations_total || 0;
+                const validationSuccessRate = (metrics.validation_success_rate || 0) * 100;
+                const warnings = metrics.warnings || 0;
+                
+                specificMetrics = `
+                    <div class="border-top pt-2 mt-2">
+                        <small class="text-muted d-block mb-1">Binance 详细指标</small>
+                        <div class="row g-1 text-center">
+                            <div class="col-4">
+                                <span class="badge bg-info w-100">交易: ${tradeCount}</span>
+                            </div>
+                            <div class="col-4">
+                                <span class="badge bg-primary w-100">深度: ${depthUpdateCount}</span>
+                            </div>
+                            <div class="col-4">
+                                <span class="badge ${warnings > 0 ? 'bg-warning' : 'bg-secondary'} w-100">警告: ${warnings}</span>
+                            </div>
                         </div>
-                        <div class="card-body text-center">
-                            <div class="mb-3">
+                        <div class="row g-1 mt-1 text-center">
+                            <div class="col-6">
+                                <small>验证: ${metrics.validations_success || 0}/${validations}</small>
+                            </div>
+                            <div class="col-6">
+                                <small>验证率: ${validationSuccessRate.toFixed(1)}%</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // Polymarket 特定指标
+            else if (adapter === 'polymarket' || metrics.adapter_type === 'polymarket') {
+                const bookCount = metrics.book_count || 0;
+                const priceChangeCount = metrics.price_change_count || 0;
+                const subscribedCount = (metrics.subscribed_symbols || []).length;
+                
+                // 延迟百分比统计
+                const p50 = metrics.p50_latency_ms || 0;
+                const p95 = metrics.p95_latency_ms || 0;
+                const p99 = metrics.p99_latency_ms || 0;
+                
+                specificMetrics = `
+                    <div class="border-top pt-2 mt-2">
+                        <small class="text-muted d-block mb-1">Polymarket 详细指标</small>
+                        <div class="row g-1 text-center">
+                            <div class="col-4">
+                                <span class="badge bg-info w-100">订单簿: ${bookCount}</span>
+                            </div>
+                            <div class="col-4">
+                                <span class="badge bg-primary w-100">价格: ${priceChangeCount}</span>
+                            </div>
+                            <div class="col-4">
+                                <span class="badge bg-secondary w-100">订阅: ${subscribedCount}</span>
+                            </div>
+                        </div>
+                        <div class="row g-1 mt-1 text-center">
+                            <div class="col-4">
+                                <small>P50: ${p50.toFixed(0)}ms</small>
+                            </div>
+                            <div class="col-4">
+                                <small>P95: ${p95.toFixed(0)}ms</small>
+                            </div>
+                            <div class="col-4">
+                                <small>P99: ${p99.toFixed(0)}ms</small>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            // 未知适配器类型
+            else {
+                // 显示所有可用的指标（调试用）
+                const availableMetrics = Object.keys(metrics).length;
+                specificMetrics = `
+                    <div class="border-top pt-2 mt-2">
+                        <small class="text-muted">可用指标: ${availableMetrics} 个</small>
+                        <div class="mt-1">
+                            <small class="badge bg-secondary me-1">${metrics.adapter_type || 'unknown'}</small>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            const card = `
+                <div class="col-lg-4 col-md-6 mb-4">
+                    <div class="card h-100 shadow-sm hover-shadow">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <h6 class="mb-0">${adapter.toUpperCase()}</h6>
+                            <div class="d-flex align-items-center">
+                                <span class="badge bg-${isConnected ? 'success' : 'danger'} me-2">
+                                    ${isConnected ? '已连接' : '未连接'}
+                                </span>
+                                ${connectionIcon}
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <!-- 延迟显示 -->
+                            <div class="text-center mb-3">
                                 <h2 class="text-${latencyColor}">${latency.toFixed(1)}</h2>
                                 <small class="text-muted">平均延迟 (ms)</small>
                             </div>
-                            <div class="row">
-                                <div class="col-6">
-                                    <h5>${successRate.toFixed(1)}%</h5>
-                                    <small>成功率</small>
-                                </div>
-                                <div class="col-6">
-                                    <h5>${messages}</h5>
-                                    <small>消息数</small>
-                                </div>
-                            </div>
+                            
+                            <!-- 通用指标 -->
+                            ${commonMetrics}
+                            
+                            <!-- 适配器特定指标 -->
+                            ${specificMetrics}
                         </div>
-                        <div class="card-footer text-center">
-                            ${connectionIcon}
-                            <small>${isConnected ? '已连接' : '未连接'}</small>
+                        <div class="card-footer">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <small class="text-muted">
+                                    <i class="bi bi-clock me-1"></i>
+                                    ${new Date().toLocaleTimeString()}
+                                </small>
+                                <small class="text-muted">
+                                    最大延迟: ${(metrics.max_latency_ms || 0).toFixed(0)}ms
+                                </small>
+                            </div>
                         </div>
                     </div>
                 </div>
