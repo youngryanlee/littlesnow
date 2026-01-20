@@ -700,26 +700,26 @@ class PolymarketAdapter(BaseAdapter):
             if message_type == 'book':
                 if not asset_id:
                     return
-                logger.info(f"📨 收到订单簿更新: {asset_id}")
+                logger.debug(f"📨 收到订单簿更新: {asset_id}")
                 self._handle_orderbook(raw_data, receive_timestamp_ms)
 
             elif message_type == 'price_change':
                 if not market_id:
                     return
-                logger.info(f"📨 Received price change for {market_id}")
+                logger.debug(f"📨 Received price change for {market_id}")
                 self._handle_price_change(raw_data, receive_timestamp_ms)    
                 
             elif message_type == 'last_trade_price':
                 if not asset_id:
                     return
-                logger.info(f"💡 收到最新成交价: {asset_id} 价格 {raw_data.get('price')}")
+                logger.debug(f"💡 收到最新成交价: {asset_id} 价格 {raw_data.get('price')}")
                 # 专门处理最新成交价
                 self._handle_last_trade_price(raw_data, receive_timestamp_ms)
                 
             elif message_type == 'trade': # user channel，暂不支持
                 if not asset_id:
                     return
-                logger.info(f"🔄 收到交易状态更新: 交易ID {raw_data.get('id')}")
+                logger.debug(f"🔄 收到交易状态更新: 交易ID {raw_data.get('id')}")
                 # 专门处理详尽的交易状态更新
                 self._handle_trade(raw_data)
 
@@ -758,14 +758,14 @@ class PolymarketAdapter(BaseAdapter):
             self._update_orderbook(asset_id, bids, asks, server_timestamp, receive_timestamp)
             
             # 生成市场数据
-            logger.info(f"To create market data for {asset_id}")
+            logger.debug(f"To create market data for {asset_id}")
             orderbook = self.orderbook_snapshots.get(asset_id)
             market_data = self._create_market_data(symbol=asset_id, exchange=ExchangeType.POLYMARKET, orderbook=orderbook)
             if market_data:
-                logger.info(f"Callback for {market_data}")
+                logger.debug(f"Callback for {market_data}")
                 self._notify_callbacks(market_data)
                 
-            logger.info(f"✅ Orderbook updated for {asset_id}: {len(bids)} bids, {len(asks)} asks")
+            logger.debug(f"✅ Orderbook updated for {asset_id}: {len(bids)} bids, {len(asks)} asks")
             
         except Exception as e:
             logger.error(f"❌ Error processing orderbook update: {e}")

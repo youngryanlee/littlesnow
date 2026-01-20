@@ -853,7 +853,7 @@ class BinanceAdapter(BaseAdapter):
             
             snapshot_last_update_id = int(snapshot['lastUpdateId'])
             local_last_update_id = self.last_update_ids.get(symbol, 0)
-            logger.info(f" 订单簿验证: {symbol} (本地更新ID: {local_last_update_id}, 快照更新ID: {snapshot_last_update_id})")
+            logger.debug(f" 订单簿验证: {symbol} (本地更新ID: {local_last_update_id}, 快照更新ID: {snapshot_last_update_id})")
             
             # 2. 获取本地订单簿
             local_ob = self.orderbook_snapshots.get(symbol)
@@ -959,7 +959,7 @@ class BinanceAdapter(BaseAdapter):
                         if price_mismatch:
                             critical_issues.append("最优价位与快照不一致（同步状态下）")
                     else:
-                        logger.info(
+                        logger.debug(
                             f"跳过最优价一致性校验：local 比 snapshot 新 {update_id_diff} 个更新"
                         )    
 
@@ -1012,9 +1012,9 @@ class BinanceAdapter(BaseAdapter):
                     total_snapshot_levels = len(snapshot_bids) + len(snapshot_asks)
                     total_local_levels = len(local_bids) + len(local_asks)
 
-                    logger.info(f"匹配统计: 本地{total_local_levels}档, 匹配{matched_levels}档, 快照{total_snapshot_levels}档")
-                    logger.info(f"买盘匹配: {matched_bids}/{len(local_bids)}, 卖盘匹配: {matched_asks}/{len(local_asks)}")
-                    logger.info(f"更新ID差异: {update_id_diff}")
+                    logger.debug(f"匹配统计: 本地{total_local_levels}档, 匹配{matched_levels}档, 快照{total_snapshot_levels}档")
+                    logger.debug(f"买盘匹配: {matched_bids}/{len(local_bids)}, 卖盘匹配: {matched_asks}/{len(local_asks)}")
+                    logger.debug(f"更新ID差异: {update_id_diff}")
 
                     # 检查匹配率
                     if len(local_bids) > 0:
@@ -1046,7 +1046,7 @@ class BinanceAdapter(BaseAdapter):
                         # 本地数据比快照新，允许数量差异（这是正常的市场变化）
                         # 只检查是否有严重问题，不检查普通数量差异
                         is_valid = len(critical_issues) == 0   
-                        logger.info(f"本地数据比快照新 {update_id_diff} 个更新，允许数量差异")
+                        logger.debug(f"本地数据比快照新 {update_id_diff} 个更新，允许数量差异")
                     else:
                         # 本地数据与快照同步，应该严格检查
                         is_valid = len(critical_issues) == 0 and len(warnings) == 0
@@ -1110,7 +1110,7 @@ class BinanceAdapter(BaseAdapter):
                 snapshot_update_id = update_id_info.get('snapshot_update_id', 'N/A')
                 
                 if is_valid:
-                    logger.info(f"✅ 订单簿验证通过: {symbol} "
+                    logger.debug(f"✅ 订单簿验证通过: {symbol} "
                             f"(本地更新ID: {local_update_id}, 快照更新ID: {snapshot_update_id})")
                 else:
                     logger.warning(f"⚠️ 订单簿验证失败: {symbol}, 原因: {details.get('reason')}")
