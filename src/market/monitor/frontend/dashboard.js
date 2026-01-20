@@ -38,15 +38,16 @@ class MarketDashboard {
         this.charts = {};
         this.dataHistory = {};
         this.connected = false;
-        this.testRunning = false;
-        this.lastUpdate = null;
+        this.testRunning = true; // 默认为运行中，因为MonitorService会自动启动
+        this.startTime = Date.now();
+        this.totalDataPoints = 0;
         
         this.initCharts();
         this.bindEvents();
         this.connectWebSocket(); // 自动连接
         this.updateStatus();
+        this.startElapsedTimer(); // 启动运行时间计时器
     }
-    
     
     initCharts() {
         console.log('初始化图表...');
@@ -188,69 +189,19 @@ class MarketDashboard {
     bindEvents() {
         console.log('绑定事件监听器...');
         
-        // 检查按钮是否存在
-        const connectBtn = document.getElementById('connect-ws');
-        const startBtn = document.getElementById('start-test');
-        const stopBtn = document.getElementById('stop-test');
+        // 检查新元素是否存在
+        const requiredElements = [
+            'connection-status', 'test-status',
+            'latency-chart', 'success-rate-chart',
+            'overview-cards', 'metrics-body',
+            'adapter-status-list', 'test-stats'
+        ];
         
-        console.log('按钮检查:', {
-            'connect-ws': connectBtn ? '✅ 存在' : '❌ 不存在',
-            'start-test': startBtn ? '✅ 存在' : '❌ 不存在',
-            'stop-test': stopBtn ? '✅ 存在' : '❌ 不存在'
+        console.log('检查DOM元素:');
+        requiredElements.forEach(id => {
+            const element = document.getElementById(id);
+            console.log(`  #${id}:`, element ? '✅ 存在' : '❌ 不存在');
         });
-        
-        // 连接WebSocket
-        if (connectBtn) {
-            connectBtn.addEventListener('click', (e) => {
-                console.log('点击连接WebSocket按钮');
-                e.preventDefault();
-                e.stopPropagation();
-                this.connectWebSocket();
-            });
-            
-            console.log('✅ connect-ws 事件绑定成功');
-        } else {
-            console.error('❌ 找不到 #connect-ws 按钮！');
-        }
-        
-        // 开始测试
-        if (startBtn) {
-            startBtn.addEventListener('click', (e) => {
-                console.log('点击开始测试按钮');
-                e.preventDefault();
-                e.stopPropagation();
-                this.startTest();
-            });
-            
-            console.log('✅ start-test 事件绑定成功');
-        }
-        
-        // 停止测试
-        if (stopBtn) {
-            stopBtn.addEventListener('click', (e) => {
-                console.log('点击停止测试按钮');
-                e.preventDefault();
-                e.stopPropagation();
-                this.stopTest();
-            });
-            
-            console.log('✅ stop-test 事件绑定成功');
-        }
-        
-        // 刷新频率
-        const refreshSlider = document.getElementById('refresh-rate');
-        const refreshValue = document.getElementById('refresh-value');
-        
-        if (refreshSlider && refreshValue) {
-            refreshSlider.addEventListener('input', (e) => {
-                const value = e.target.value;
-                refreshValue.textContent = `${value}秒`;
-                this.refreshRate = value * 1000;
-                console.log(`刷新频率设置为: ${value}秒`);
-            });
-            
-            console.log('✅ 刷新频率滑块事件绑定成功');
-        }
         
         // 测试按钮点击（用于调试）
         document.body.addEventListener('click', (e) => {
@@ -264,7 +215,7 @@ class MarketDashboard {
     }
     
     connectWebSocket() {
-        console.log('connectWebSocket被调用');
+        console.log('自动连接WebSocket...');
         
         // 如果已有连接，先关闭
         if (this.ws) {
@@ -282,6 +233,11 @@ class MarketDashboard {
             console.log('✅ WebSocket连接已建立');
             this.connected = true;
             this.updateStatus();
+            
+            // 连接成功后请求初始数据
+            setTimeout(() => {
+                this.requestInitialData();
+            }, 1000);
         };
         
         this.ws.onmessage = (event) => {
@@ -294,10 +250,32 @@ class MarketDashboard {
             }
         };
         
-        this.ws.onclose = () => {
-            console.log('WebSocket连接已关闭');
+        this.ws.onclose = (event) => {
+            console.log('WebSocket连接已关闭', {
+                code: event.code,
+                reason: event.reason,
+                wasClean: event.wasClean
+            });
+            
             this.connected = false;
+            
+            // 连接关闭时，认为测试已停止
+            this.testRunning = false;
+            
+            // 停止运行时间计时器
+            if (this.elapsedTimer) {
+                clearInterval(this.elapsedTimer);
+                this.elapsedTimer = null;
+            }
+            
             this.updateStatus();
+            
+            // 显示连接断开通知
+            this.showNotification(
+                '连接断开', 
+                '与服务器的WebSocket连接已断开，监控已停止',
+                'warning'
+            );
             
             // 3秒后尝试重连
             setTimeout(() => {
@@ -311,13 +289,31 @@ class MarketDashboard {
         };
     }
     
+    requestInitialData() {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            console.log('请求初始数据...');
+            this.ws.send(JSON.stringify({ 
+                type: 'get_initial_data' 
+            }));
+        } else {
+            // 如果WebSocket未就绪，通过HTTP获取数据
+            this.fetchDataViaHTTP();
+        }
+    }
+    
     handleMessage(data) {
-        this.lastUpdate = new Date();
+        this.totalDataPoints++;
         
         // 更新最后更新时间显示
         const lastUpdateEl = document.getElementById('last-update');
         if (lastUpdateEl) {
-            lastUpdateEl.textContent = this.lastUpdate.toLocaleTimeString();
+            lastUpdateEl.textContent = new Date().toLocaleTimeString();
+        }
+        
+        // 更新数据点计数
+        const dataPointsEl = document.getElementById('total-data-points');
+        if (dataPointsEl) {
+            dataPointsEl.textContent = this.totalDataPoints.toLocaleString();
         }
         
         switch (data.type) {
@@ -326,11 +322,21 @@ class MarketDashboard {
                 break;
                 
             case 'status':
-                this.testRunning = data.test_running || false;
+                this.testRunning = data.test_running !== false; // 默认为true
                 if (data.summary) {
                     this.updateDashboard({ summary: data.summary });
                 }
                 this.updateStatus();
+                break;
+                
+            case 'initial_data':
+                // 处理初始数据
+                if (data.start_time) {
+                    this.updateStartTime(data.start_time);
+                }
+                if (data.summary) {
+                    this.updateDashboard({ summary: data.summary });
+                }
                 break;
                 
             case 'test_complete':
@@ -361,6 +367,9 @@ class MarketDashboard {
         
         // 更新图表
         this.updateCharts(summary);
+        
+        // 更新适配器状态列表
+        this.updateAdapterStatusList(summary);
         
         // 更新统计信息
         this.updateStats(testInfo);
@@ -430,7 +439,7 @@ class MarketDashboard {
                 <div class="col-12 text-center py-5">
                     <i class="bi bi-inbox display-1 text-muted"></i>
                     <p class="mt-3">等待数据...</p>
-                    <small class="text-muted">请启动压力测试或确保适配器正在运行</small>
+                    <small class="text-muted">适配器正在启动中...</small>
                 </div>
             `;
         }
@@ -450,7 +459,7 @@ class MarketDashboard {
             const successRate = (metrics.success_rate || 0) * 100;
             const messages = metrics.messages_received || 0;
             const isConnected = metrics.is_connected || false;
-            const lastUpdate = metrics.last_update || this.lastUpdate.toLocaleTimeString();
+            const lastUpdate = metrics.last_update || new Date().toLocaleTimeString();
             
             const row = `
                 <tr>
@@ -489,6 +498,57 @@ class MarketDashboard {
                         <i class="bi bi-database-slash"></i> 暂无数据
                     </td>
                 </tr>
+            `;
+        }
+    }
+    
+    updateAdapterStatusList(summary) {
+        const container = document.getElementById('adapter-status-list');
+        if (!container) return;
+        
+        container.innerHTML = '';
+        
+        Object.entries(summary).forEach(([adapter, metrics]) => {
+            const isConnected = metrics.is_connected || false;
+            const successRate = (metrics.success_rate || 0) * 100;
+            const latency = metrics.avg_latency_ms || 0;
+            const messages = metrics.messages_received || 0;
+            
+            const statusItem = document.createElement('div');
+            statusItem.className = 'mb-3';
+            
+            statusItem.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-1">
+                    <strong>${adapter.toUpperCase()}</strong>
+                    <span class="badge ${isConnected ? 'bg-success' : 'bg-danger'}">
+                        ${isConnected ? '在线' : '离线'}
+                    </span>
+                </div>
+                <div class="row small text-muted">
+                    <div class="col-6">
+                        <div>${successRate.toFixed(1)}%</div>
+                        <small>成功率</small>
+                    </div>
+                    <div class="col-6">
+                        <div>${latency.toFixed(0)}ms</div>
+                        <small>延迟</small>
+                    </div>
+                </div>
+                <div class="mt-1 small">
+                    <i class="bi bi-chat-dots"></i> ${messages} 条消息
+                </div>
+            `;
+            
+            container.appendChild(statusItem);
+        });
+        
+        if (Object.keys(summary).length === 0) {
+            container.innerHTML = `
+                <div class="text-center py-3">
+                    <i class="bi bi-database-slash display-6 text-muted"></i>
+                    <p class="mt-2">暂无适配器数据</p>
+                    <small class="text-muted">等待监控系统启动</small>
+                </div>
             `;
         }
     }
@@ -583,154 +643,130 @@ class MarketDashboard {
             return;
         }
         
-        if (testInfo && Object.keys(testInfo).length > 0) {
-            container.innerHTML = `
+        // 移除状态显示，因为顶部和左侧已经有了
+        let additionalInfo = '';
+        if (testInfo && testInfo.duration_hours) {
+            additionalInfo = `
                 <div class="mb-2">
-                    <small class="text-muted">运行状态:</small>
-                    <div><strong>${testInfo.status === 'running' ? '运行中' : '已停止'}</strong></div>
-                </div>
-                <div class="mb-2">
-                    <small class="text-muted">已运行:</small>
-                    <div><strong>${testInfo.elapsed_hours ? testInfo.elapsed_hours.toFixed(2) : '0.00'} 小时</strong></div>
-                </div>
-                <div class="mb-2">
-                    <small class="text-muted">总时长:</small>
-                    <div><strong>${testInfo.duration_hours || '1.00'} 小时</strong></div>
+                    <small class="text-muted">预设时长:</small>
+                    <div><strong>${this.formatDuration(testInfo.duration_hours)}</strong></div>
                 </div>
             `;
-        } else {
-            container.innerHTML = '<p class="text-muted">等待数据...</p>';
         }
+        
+        container.innerHTML = `
+            <h6>运行信息</h6>
+            ${additionalInfo}
+            <div class="mb-2">
+                <small class="text-muted">启动时间:</small>
+                <div><strong id="start-time">${new Date(this.startTime).toLocaleTimeString()}</strong></div>
+            </div>
+            <div class="mb-2">
+                <small class="text-muted">已运行:</small>
+                <div><strong id="elapsed-time">00:00:00</strong></div>
+            </div>
+            <div class="mb-2">
+                <small class="text-muted">总数据点:</small>
+                <div><strong id="total-data-points">${this.totalDataPoints}</strong></div>
+            </div>
+        `;
     }
     
     updateStatus() {
         const connectionStatus = document.getElementById('connection-status');
+        const connectionStatusDetail = document.getElementById('connection-status-detail');
         const testStatus = document.getElementById('test-status');
-        const startBtn = document.getElementById('start-test');
-        const stopBtn = document.getElementById('stop-test');
+        const testStatusDetail = document.getElementById('test-status-detail');
         const connectionInfo = document.getElementById('connection-info');
+        const testInfo = document.getElementById('test-info');
         
-        // 更新连接状态
+        // 更新顶部导航栏的连接状态
         if (connectionStatus) {
             if (this.connected) {
                 connectionStatus.className = 'badge bg-success me-3';
                 connectionStatus.textContent = '已连接';
-                if (connectionInfo) connectionInfo.textContent = 'WebSocket连接正常';
             } else {
                 connectionStatus.className = 'badge bg-danger me-3';
                 connectionStatus.textContent = '未连接';
-                if (connectionInfo) connectionInfo.textContent = '正在尝试连接...';
             }
         }
         
-        // 更新测试状态
+        // 更新左侧面板的详细连接状态
+        if (connectionStatusDetail) {
+            if (this.connected) {
+                connectionStatusDetail.className = 'badge bg-success';
+                connectionStatusDetail.textContent = '已连接';
+                if (connectionInfo) {
+                    connectionInfo.textContent = this.testRunning ? '实时数据推送中' : '连接正常';
+                }
+            } else {
+                connectionStatusDetail.className = 'badge bg-danger';
+                connectionStatusDetail.textContent = '连接中...';
+                if (connectionInfo) {
+                    connectionInfo.textContent = '正在尝试连接服务器';
+                }
+            }
+        }
+        
+        // 更新顶部导航栏的测试状态
         if (testStatus) {
             if (this.testRunning) {
                 testStatus.className = 'badge bg-success';
-                testStatus.textContent = '测试运行中';
-                if (startBtn) startBtn.disabled = true;
-                if (stopBtn) stopBtn.disabled = false;
+                testStatus.textContent = '运行中';
             } else {
                 testStatus.className = 'badge bg-secondary';
-                testStatus.textContent = '测试未运行';
-                if (startBtn) startBtn.disabled = false;
-                if (stopBtn) stopBtn.disabled = true;
+                testStatus.textContent = '已停止';
+            }
+        }
+        
+        // 更新左侧面板的详细测试状态
+        if (testStatusDetail) {
+            if (this.testRunning) {
+                testStatusDetail.className = 'badge bg-success';
+                testStatusDetail.textContent = '运行中';
+                if (testInfo) {
+                    testInfo.textContent = '监控系统正在自动运行';
+                }
+            } else {
+                testStatusDetail.className = 'badge bg-secondary';
+                testStatusDetail.textContent = '已停止';
+                if (testInfo) {
+                    testInfo.textContent = '监控系统已停止';
+                }
             }
         }
     }
     
-    async startTest() {
-        console.log('startTest被调用');
-        
-        const durationInput = document.getElementById('test-duration');
-        const duration = durationInput ? parseFloat(durationInput.value) || 1.0 : 1.0;
-        
-        console.log(`请求参数: duration=${duration}小时`);
-        
-        try {
-            // 显示加载状态
-            const startBtn = document.getElementById('start-test');
-            const originalText = startBtn ? startBtn.innerHTML : '';
-            
-            if (startBtn) {
-                startBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 启动中...';
-                startBtn.disabled = true;
-            }
-            
-            console.log(`发送POST请求到 /api/test/start`);
-            
-            const response = await fetch('/api/test/start', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify({ duration_hours: duration })
-            });
-            
-            console.log('响应状态:', response.status);
-            
-            const result = await response.json();
-            console.log('响应数据:', result);
-            
-            // 恢复按钮状态
-            if (startBtn) {
-                startBtn.innerHTML = originalText;
-                startBtn.disabled = false;
-            }
-            
-            if (response.ok && result.status === 'success') {
-                console.log('✅ 测试启动成功');
-                this.testRunning = true;
-                this.updateStatus();
-            } else {
-                console.error('❌ 测试启动失败:', result.message);
-            }
-            
-        } catch (error) {
-            console.error('❌ startTest请求异常:', error);
-            
-            // 恢复按钮状态
-            const startBtn = document.getElementById('start-test');
-            if (startBtn) {
-                startBtn.innerHTML = '<i class="bi bi-play-fill"></i> 开始测试';
-                startBtn.disabled = false;
-            }
-        }
-    }
-
-    // 添加主动数据拉取方法
-    startDataPolling() {
-        console.log('开始主动数据拉取...');
-        
-        // 停止现有的轮询
-        if (this.dataPollingInterval) {
-            clearInterval(this.dataPollingInterval);
+    startElapsedTimer() {
+        // 更新启动时间显示
+        const startTimeEl = document.getElementById('start-time');
+        if (startTimeEl) {
+            startTimeEl.textContent = new Date(this.startTime).toLocaleTimeString();
         }
         
-        // 每5秒拉取一次数据
-        this.dataPollingInterval = setInterval(() => {
-            if (this.testRunning) {
-                console.log('主动拉取数据...');
-                
-                // 方法1: 通过WebSocket请求数据
-                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                    this.ws.send(JSON.stringify({ type: 'get_summary' }));
-                    console.log('已通过WebSocket请求数据');
-                }
-                
-                // 方法2: 通过HTTP API拉取数据作为备用
-                this.fetchDataViaHTTP();
-            } else {
-                // 测试停止，清除轮询
-                clearInterval(this.dataPollingInterval);
-                this.dataPollingInterval = null;
-                console.log('测试停止，清除数据轮询');
+        // 每秒更新已运行时间
+        setInterval(() => {
+            const elapsedSeconds = Math.floor((Date.now() - this.startTime) / 1000);
+            const hours = Math.floor(elapsedSeconds / 3600);
+            const minutes = Math.floor((elapsedSeconds % 3600) / 60);
+            const seconds = elapsedSeconds % 60;
+            
+            const elapsedTimeEl = document.getElementById('elapsed-time');
+            if (elapsedTimeEl) {
+                elapsedTimeEl.textContent = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
             }
-        }, 5000); // 每5秒拉取一次
+        }, 1000);
     }
-
-    // 通过HTTP API拉取数据
+    
+    updateStartTime(timestamp) {
+        this.startTime = new Date(timestamp).getTime() || Date.now();
+        const startTimeEl = document.getElementById('start-time');
+        if (startTimeEl) {
+            startTimeEl.textContent = new Date(this.startTime).toLocaleTimeString();
+        }
+    }
+    
+    // 通过HTTP API拉取数据（备用方法）
     async fetchDataViaHTTP() {
         try {
             console.log('通过HTTP API拉取数据...');
@@ -771,64 +807,6 @@ class MarketDashboard {
             
         } catch (error) {
             console.error('HTTP数据拉取失败:', error);
-        }
-    }
-    
-    async stopTest() {
-        console.log('stopTest被调用');
-        
-        try {
-            // 显示加载状态
-            const stopBtn = document.getElementById('stop-test');
-            const originalText = stopBtn ? stopBtn.innerHTML : '';
-            
-            if (stopBtn) {
-                stopBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 停止中...';
-                stopBtn.disabled = true;
-            }
-            
-            console.log('发送POST请求到 /api/test/stop');
-            console.time('stopTest请求');
-            
-            const response = await fetch('/api/test/stop', {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json'
-                }
-            });
-            
-            console.timeEnd('stopTest请求');
-            console.log('响应状态:', response.status, response.statusText);
-            
-            const result = await response.json();
-            console.log('响应数据:', result);
-            
-            // 恢复按钮状态
-            if (stopBtn) {
-                stopBtn.innerHTML = originalText;
-                stopBtn.disabled = false;
-            }
-            
-            if (response.ok && result.status === 'success') {
-                console.log('✅ 测试停止成功');
-                this.showNotification('测试停止', result.message, 'warning');
-                this.testRunning = false;
-                this.updateStatus();
-            } else {
-                console.error('❌ 测试停止失败:', result.message);
-                this.showNotification('错误', result.message || '停止测试失败', 'error');
-            }
-            
-        } catch (error) {
-            console.error('❌ stopTest请求异常:', error);
-            this.showNotification('错误', '停止测试失败: ' + error.message, 'error');
-            
-            // 恢复按钮状态
-            const stopBtn = document.getElementById('stop-test');
-            if (stopBtn) {
-                stopBtn.innerHTML = '<i class="bi bi-stop-fill"></i> 停止测试';
-                stopBtn.disabled = false;
-            }
         }
     }
     
@@ -897,28 +875,9 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('DOMContentLoaded事件触发');
     console.log('页面加载完成，开始初始化...');
     
-    // 检查必要的DOM元素
-    const requiredElements = [
-        'connect-ws', 'start-test', 'stop-test',
-        'latency-chart', 'success-rate-chart',
-        'overview-cards', 'metrics-body'
-    ];
-    
-    console.log('检查DOM元素:');
-    requiredElements.forEach(id => {
-        const element = document.getElementById(id);
-        console.log(`  #${id}:`, element ? '✅ 存在' : '❌ 不存在');
-    });
-    
     try {
         window.dashboard = new MarketDashboard();
         console.log('✅ MarketDashboard初始化成功');
-        
-        // 自动尝试连接WebSocket
-        setTimeout(() => {
-            console.log('自动尝试连接WebSocket...');
-            window.dashboard.connectWebSocket();
-        }, 2000);
         
     } catch (error) {
         console.error('❌ MarketDashboard初始化失败:', error);

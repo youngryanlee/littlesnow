@@ -1,5 +1,5 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
+<!<!DOCTYPE html>
+<htmlhtml lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -25,54 +25,66 @@
         </nav>
 
         <div class="row">
-            <!-- 左侧控制面板 -->
+            <!-- 左侧信息面板 -->
             <div class="col-md-3">
+                <!-- 系统状态卡片 -->
                 <div class="card mb-4">
                     <div class="card-header">
-                        <h5 class="mb-0"><i class="bi bi-gear"></i> 控制面板</h5>
+                        <h5 class="mb-0"><i class="bi bi-info-circle"></i> 系统状态</h5>
                     </div>
                     <div class="card-body">
+                        <!-- 连接状态 -->
                         <div class="mb-3">
-                            <label class="form-label">测试时长 (小时)</label>
-                            <input type="number" id="test-duration" class="form-control" value="1" min="0.1" step="0.1">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span>WebSocket连接</span>
+                                <span id="connection-status-detail" class="badge bg-success">已连接</span>
+                            </div>
+                            <small class="text-muted" id="connection-info">实时数据推送中</small>
                         </div>
                         
-                        <div class="d-grid gap-2 mb-3">
-                            <button id="start-test" class="btn btn-success">
-                                <i class="bi bi-play-fill"></i> 开始测试
-                            </button>
-                            <button id="stop-test" class="btn btn-danger" disabled>
-                                <i class="bi bi-stop-fill"></i> 停止测试
-                            </button>
-                        </div>
+                        <hr>
                         
+                        <!-- 测试状态 -->
                         <div class="mb-3">
-                            <label class="form-label">刷新频率 (秒)</label>
-                            <input type="range" id="refresh-rate" class="form-range" min="1" max="10" value="2">
-                            <div class="text-center" id="refresh-value">2秒</div>
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span>监控状态</span>
+                                <span id="test-status-detail" class="badge bg-success">运行中</span>
+                            </div>
+                            <small class="text-muted" id="test-info">监控系统正在自动运行</small>
                         </div>
                         
-                        <div class="mb-3">
-                            <button id="connect-ws" class="btn btn-primary w-100">
-                                <i class="bi bi-plug"></i> 连接WebSocket
-                            </button>
-                        </div>
+                        <hr>
                         
-                        <div class="mt-4">
-                            <h6>连接信息</h6>
-                            <small class="text-muted" id="connection-info">未连接</small>
+                        <!-- 数据统计 -->
+                        <div id="test-stats">
+                            <h6>运行信息</h6>
+                            <div class="mb-2">
+                                <small class="text-muted">启动时间:</small>
+                                <div><strong id="start-time">--:--:--</strong></div>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">已运行:</small>
+                                <div><strong id="elapsed-time">00:00:00</strong></div>
+                            </div>
+                            <div class="mb-2">
+                                <small class="text-muted">总数据点:</small>
+                                <div><strong id="total-data-points">0</strong></div>
+                            </div>
                         </div>
                     </div>
                 </div>
                 
-                <!-- 测试统计 -->
+                <!-- 适配器状态 -->
                 <div class="card">
                     <div class="card-header">
-                        <h5 class="mb-0"><i class="bi bi-bar-chart"></i> 测试统计</h5>
+                        <h5 class="mb-0"><i class="bi bi-plug"></i> 适配器状态</h5>
                     </div>
                     <div class="card-body">
-                        <div id="test-stats">
-                            <p class="text-muted">等待数据...</p>
+                        <div id="adapter-status-list">
+                            <div class="text-center py-3">
+                                <div class="spinner-border spinner-border-sm text-primary"></div>
+                                <p class="mt-2 small">加载适配器状态...</p>
+                            </div>
                         </div>
                     </div>
                 </div>
