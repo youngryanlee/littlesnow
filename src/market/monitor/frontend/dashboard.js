@@ -267,6 +267,9 @@ class MarketDashboard {
                 clearInterval(this.elapsedTimer);
                 this.elapsedTimer = null;
             }
+
+            // 更新适配器为离线状态
+            this.updateAdaptersToOffline();
             
             this.updateStatus();
             
@@ -367,9 +370,6 @@ class MarketDashboard {
         
         // 更新图表
         this.updateCharts(summary);
-        
-        // 更新适配器状态列表
-        this.updateAdapterStatusList(summary);
         
         // 更新统计信息
         this.updateStats(testInfo);
@@ -502,57 +502,6 @@ class MarketDashboard {
         }
     }
     
-    updateAdapterStatusList(summary) {
-        const container = document.getElementById('adapter-status-list');
-        if (!container) return;
-        
-        container.innerHTML = '';
-        
-        Object.entries(summary).forEach(([adapter, metrics]) => {
-            const isConnected = metrics.is_connected || false;
-            const successRate = (metrics.success_rate || 0) * 100;
-            const latency = metrics.avg_latency_ms || 0;
-            const messages = metrics.messages_received || 0;
-            
-            const statusItem = document.createElement('div');
-            statusItem.className = 'mb-3';
-            
-            statusItem.innerHTML = `
-                <div class="d-flex justify-content-between align-items-center mb-1">
-                    <strong>${adapter.toUpperCase()}</strong>
-                    <span class="badge ${isConnected ? 'bg-success' : 'bg-danger'}">
-                        ${isConnected ? '在线' : '离线'}
-                    </span>
-                </div>
-                <div class="row small text-muted">
-                    <div class="col-6">
-                        <div>${successRate.toFixed(1)}%</div>
-                        <small>成功率</small>
-                    </div>
-                    <div class="col-6">
-                        <div>${latency.toFixed(0)}ms</div>
-                        <small>延迟</small>
-                    </div>
-                </div>
-                <div class="mt-1 small">
-                    <i class="bi bi-chat-dots"></i> ${messages} 条消息
-                </div>
-            `;
-            
-            container.appendChild(statusItem);
-        });
-        
-        if (Object.keys(summary).length === 0) {
-            container.innerHTML = `
-                <div class="text-center py-3">
-                    <i class="bi bi-database-slash display-6 text-muted"></i>
-                    <p class="mt-2">暂无适配器数据</p>
-                    <small class="text-muted">等待监控系统启动</small>
-                </div>
-            `;
-        }
-    }
-    
     updateCharts(summary) {
         // 如果没有开始时间，使用当前时间作为参考
         if (!this.chartStartTime) {
@@ -670,6 +619,40 @@ class MarketDashboard {
                 <div><strong id="total-data-points">${this.totalDataPoints}</strong></div>
             </div>
         `;
+    }
+
+    updateAdaptersToOffline() {
+        console.log('标记所有适配器为离线状态');
+        
+        // 如果有缓存的上一次数据，使用它作为基础
+        const offlineSummary = {};
+        
+        // 获取已知适配器列表（可以从已有数据或配置中获取）
+        let adapters = [];
+        
+        if (this.lastSummary && Object.keys(this.lastSummary).length > 0) {
+            // 使用上次收到的数据
+            adapters = Object.keys(this.lastSummary);
+            console.log('使用缓存的适配器列表:', adapters);
+        } else {
+            // 默认适配器列表（根据实际情况调整）
+            adapters = ['binance', 'polymarket'];
+            console.log('使用默认适配器列表:', adapters);
+        }
+        
+        // 为每个适配器创建离线状态
+        adapters.forEach(adapter => {
+            offlineSummary[adapter] = {
+                avg_latency_ms: 0,
+                success_rate: 0,
+                messages_received: 0,
+                is_connected: false,
+                last_update: new Date().toLocaleTimeString()
+            };
+        });
+        
+        // 更新仪表板显示离线状态
+        this.updateDashboard({ summary: offlineSummary });
     }
     
     updateStatus() {

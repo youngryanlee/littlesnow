@@ -61,55 +61,44 @@ body {
 #test-status-detail {
     font-size: 0.8em;
     padding: 0.35em 0.7em;
+    min-width: 70px;
+    text-align: center;
 }
 
 #connection-info,
 #test-info {
     font-size: 0.85em;
     opacity: 0.9;
+    line-height: 1.4;
 }
 
-/* 适配器状态列表 */
-#adapter-status-list {
-    max-height: 300px;
-    overflow-y: auto;
+/* 系统状态卡片样式优化（现在只有一个卡片） */
+#system-status-card {
+    height: auto;
+    min-height: 300px;
 }
 
-#adapter-status-list > div {
-    padding: 0.75rem;
-    border-bottom: 1px solid #f1f3f4;
-    transition: all 0.2s ease;
+#system-status-card .card-body {
+    padding: 1.5rem;
 }
 
-#adapter-status-list > div:hover {
-    background-color: #f8f9fa;
-    border-radius: 6px;
-}
-
-#adapter-status-list > div:last-child {
-    border-bottom: none;
-}
-
-#adapter-status-list strong {
-    font-size: 0.95em;
-    color: #495057;
-}
-
-/* 运行信息样式 */
+/* 运行信息样式增强 */
 #test-stats h6 {
     color: #495057;
     font-weight: 600;
-    font-size: 0.95em;
-    margin-bottom: 0.75rem;
+    font-size: 0.95rem;
+    margin-bottom: 1rem;
 }
 
 #test-stats div {
-    margin-bottom: 0.5rem;
+    margin-bottom: 0.75rem;
 }
 
 #test-stats strong {
     color: #212529;
     font-weight: 500;
+    font-size: 1rem;
+    font-family: 'Courier New', monospace;
 }
 
 #test-stats small {
@@ -333,16 +322,19 @@ footer small {
     .table td {
         padding: 0.5rem;
     }
-}
-
-/* 适配器状态卡片动画 */
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-#adapter-status-list > div {
-    animation: fadeIn 0.3s ease-out;
+    
+    /* 移动端系统状态卡片调整 */
+    #system-status-card .card-body {
+        padding: 1rem;
+    }
+    
+    #test-stats h6 {
+        font-size: 0.9rem;
+    }
+    
+    #test-stats strong {
+        font-size: 0.9rem;
+    }
 }
 
 /* 数据更新高亮效果 */
@@ -353,4 +345,85 @@ footer small {
 
 .table tbody tr.updating {
     animation: highlight 1s ease-out;
+}
+
+/* 新增：快捷操作按钮样式 */
+.quick-actions {
+    margin-top: 1.5rem;
+}
+
+.quick-actions h6 {
+    color: #495057;
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 0.75rem;
+}
+
+.quick-actions .btn {
+    border-radius: 6px;
+    font-size: 0.85rem;
+    padding: 0.375rem 0.75rem;
+}
+
+.quick-actions .btn-outline-primary {
+    border-color: #0d6efd;
+    color: #0d6efd;
+}
+
+.quick-actions .btn-outline-primary:hover {
+    background-color: #0d6efd;
+    color: white;
+}
+
+.quick-actions .btn-outline-secondary {
+    border-color: #6c757d;
+    color: #6c757d;
+}
+
+.quick-actions .btn-outline-secondary:hover {
+    background-color: #6c757d;
+    color: white;
+}
+
+/* 新增：系统健康度指示器 */
+.system-health {
+    margin-top: 1.5rem;
+}
+
+.system-health h6 {
+    color: #495057;
+    font-weight: 600;
+    font-size: 0.95rem;
+    margin-bottom: 0.75rem;
+}
+
+.system-health div {
+    margin-bottom: 0.75rem;
+}
+
+.system-health small {
+    color: #6c757d;
+    font-size: 0.85em;
+}
+
+.system-health .progress {
+    height: 6px;
+    margin-top: 0.25rem;
+}
+
+#data-latency {
+    font-family: 'Courier New', monospace;
+    font-weight: 500;
+}
+
+/* 新增：分隔线样式 */
+hr {
+    border: none;
+    border-top: 1px solid #e9ecef;
+    margin: 1.25rem 0;
+}
+
+/* 新增：按钮组间距调整 */
+.d-grid.gap-2 {
+    gap: 0.5rem !important;
 }
