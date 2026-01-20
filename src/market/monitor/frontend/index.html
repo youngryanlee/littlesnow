@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>市场数据实时监控</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.8.1/font/bootstrap-icons.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- 顶部导航栏 -->
+        <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="#">
+                    <i class="bi bi-graph-up"></i> 市场数据实时监控
+                </a>
+                <div class="d-flex">
+                    <span id="connection-status" class="badge bg-danger me-3">未连接</span>
+                    <span id="test-status" class="badge bg-secondary">测试未运行</span>
+                </div>
+            </div>
+        </nav>
+
+        <div class="row">
+            <!-- 左侧控制面板 -->
+            <div class="col-md-3">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="bi bi-gear"></i> 控制面板</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">测试时长 (小时)</label>
+                            <input type="number" id="test-duration" class="form-control" value="1" min="0.1" step="0.1">
+                        </div>
+                        
+                        <div class="d-grid gap-2 mb-3">
+                            <button id="start-test" class="btn btn-success">
+                                <i class="bi bi-play-fill"></i> 开始测试
+                            </button>
+                            <button id="stop-test" class="btn btn-danger" disabled>
+                                <i class="bi bi-stop-fill"></i> 停止测试
+                            </button>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label class="form-label">刷新频率 (秒)</label>
+                            <input type="range" id="refresh-rate" class="form-range" min="1" max="10" value="2">
+                            <div class="text-center" id="refresh-value">2秒</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <button id="connect-ws" class="btn btn-primary w-100">
+                                <i class="bi bi-plug"></i> 连接WebSocket
+                            </button>
+                        </div>
+                        
+                        <div class="mt-4">
+                            <h6>连接信息</h6>
+                            <small class="text-muted" id="connection-info">未连接</small>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 测试统计 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="bi bi-bar-chart"></i> 测试统计</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="test-stats">
+                            <p class="text-muted">等待数据...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 主内容区 -->
+            <div class="col-md-9">
+                <!-- 实时数据概览 -->
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-speedometer2"></i> 实时概览</h5>
+                            </div>
+                            <div class="card-body">
+                                <div class="row" id="overview-cards">
+                                    <!-- 这里会动态生成概览卡片 -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 图表区域 -->
+                <div class="row">
+                    <div class="col-md-6">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-graph-up"></i> 延迟趋势</h5>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="latency-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-6">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="mb-0"><i class="bi bi-percent"></i> 成功率趋势</h5>
+                            </div>
+                            <div class="card-body">
+                                <canvas id="success-rate-chart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 详细数据表格 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0"><i class="bi bi-table"></i> 详细指标</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover" id="metrics-table">
+                                <thead>
+                                    <tr>
+                                        <th>适配器</th>
+                                        <th>平均延迟</th>
+                                        <th>成功率</th>
+                                        <th>消息数</th>
+                                        <th>连接状态</th>
+                                        <th>最后更新时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="metrics-body">
+                                    <!-- 这里会动态填充数据 -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 页脚 -->
+        <footer class="mt-4 py-3 text-center text-muted">
+            <small>市场数据监控系统 &copy; 2024 | 最后更新: <span id="last-update">--</span></small>
+        </footer>
+    </div>
+
+    <!-- 加载JavaScript -->
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>

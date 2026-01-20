@@ -501,28 +501,31 @@ class MonitorDashboard:
     """Streamlit实时监控仪表板（WebSocket版本）"""
     
     def __init__(self, monitor=None, websocket_uri: str = "ws://localhost:9999/ws"):
-        """
-        初始化仪表板
-        
-        Args:
-            monitor: 本地监控器实例（本地模式使用）
-            websocket_uri: WebSocket服务器地址
-        """
         logger.info("init MonitorDashboard")
         # 初始化状态
         self.monitor = monitor
         self.websocket_uri = websocket_uri
         
-        # 数据存储
-        self.history = defaultdict(lambda: defaultdict(list))
-        self.current_summary = {}
-        self.new_data_received = False  # 新增：数据接收标志
+        # 关键修复：从session state恢复数据，而不是每次都重置
+        if 'dashboard_history' in st.session_state:
+            # 恢复历史数据
+            self.history = st.session_state.dashboard_history
+        else:
+            self.history = defaultdict(lambda: defaultdict(list))
+            
+        if 'dashboard_current_summary' in st.session_state:
+            # 恢复当前摘要
+            self.current_summary = st.session_state.dashboard_current_summary
+        else:
+            self.current_summary = {}
+        
+        self.new_data_received = False
         
         # WebSocket客户端
         self.ws_client = WebSocketMonitorClient(websocket_uri)
         self.ws_client.add_callback(self._on_websocket_data)
         
-        # HTTP客户端（用于获取历史数据）
+        # HTTP客户端
         self.http_client = HTTPMonitorClient(websocket_uri.replace("ws://", "http://").replace("/ws", ""))
         
         # 控制状态
@@ -543,9 +546,8 @@ class MonitorDashboard:
             st.session_state.ws_connected = False
         
     def _on_websocket_data(self, data: Dict):
-        """WebSocket数据回调函数"""
+        """WebSocket数据回调函数 - 增强版本"""
         logger.info(f"[Dashboard] 收到WebSocket数据: type={data.get('type')}")
-        logger.info(f"[Dashboard] 数据键: {list(data.keys())}")
         
         message_type = data.get('type')
         
@@ -555,24 +557,20 @@ class MonitorDashboard:
             summary = data_content.get('summary', {})
             timestamp = data.get('timestamp', time.time())
             
-            logger.info(f"[Dashboard] metrics_update - 摘要类型: {type(summary)}, 长度: {len(summary)}")
-            logger.info(f"[Dashboard] 摘要中的适配器: {list(summary.keys())}")
+            logger.info(f"[Dashboard] metrics_update - 摘要长度: {len(summary)}")
             
-            # 检查摘要内容
-            if summary:
-                logger.info(f"[Dashboard] 第一个适配器的数据: {list(summary.values())[0]}")
-            
-            # 更新当前摘要
+            # 关键修复：同时更新多个存储位置
             self.current_summary = summary
             st.session_state.current_summary = summary
-            
-            logger.info(f"[Dashboard] 更新后current_summary类型: {type(self.current_summary)}, 长度: {len(self.current_summary)}")
-            logger.info(f"[Dashboard] 更新后current_summary键: {list(self.current_summary.keys())}")
+            st.session_state.dashboard_current_summary = summary  # 新增：持久化存储
             
             # 存储历史数据
             for adapter_name, metrics in summary.items():
                 logger.info(f"[Dashboard] 处理适配器: {adapter_name}")
-                logger.info(f"[Dashboard] 适配器指标类型: {type(metrics)}, 键: {list(metrics.keys())}")
+                
+                # 确保历史数据结构存在
+                if adapter_name not in self.history:
+                    self.history[adapter_name] = defaultdict(list)
                 
                 self.history[adapter_name]['timestamps'].append(timestamp)
                 self.history[adapter_name]['avg_latency_ms'].append(metrics.get('avg_latency_ms', 0))
@@ -587,24 +585,17 @@ class MonitorDashboard:
                     if len(self.history[adapter_name][key]) > 1000:
                         self.history[adapter_name][key].pop(0)
             
-            logger.info(f"[Dashboard] history数据长度: {len(self.history)}")
-            if self.history:
-                first_adapter = list(self.history.keys())[0]
-                logger.info(f"[Dashboard] 第一个适配器历史数据: {list(self.history[first_adapter].keys())}")
-        
+            # 关键修复：保存历史数据到session state
+            st.session_state.dashboard_history = self.history
+            
+            logger.info(f"[Dashboard] 数据已更新并保存到session state")
+            
         elif message_type == 'welcome':
             logger.info(f"[Dashboard] WebSocket欢迎消息: {data.get('message')}")
             self.connection_status = "connected"
             st.session_state.ws_connected = True
-            logger.info(f"[Dashboard] 连接状态更新为: connected")
-        
-        elif message_type == 'pong':
-            # 心跳响应
-            logger.info(f"[Dashboard] 收到pong响应")
-        
-        else:
-            logger.info(f"[Dashboard] 未知消息类型: {message_type}")
-            logger.info(f"[Dashboard] 完整数据: {data}")    
+            st.session_state.last_connection_time = time.time()
+            logger.info(f"[Dashboard] 连接状态更新为: connected") 
     
     def start_monitoring(self):
         """开始监控"""
@@ -661,7 +652,7 @@ class MonitorDashboard:
                 time.sleep(5)
     
     def create_dashboard(self):
-        """创建Streamlit仪表板"""
+        """创建Streamlit仪表板 - 增强版本"""
         st.set_page_config(
             page_title="Market Data Monitor (WebSocket)",
             page_icon="📈",
@@ -677,6 +668,23 @@ class MonitorDashboard:
         if not self.ws_client.running:
             logger.info("[Dashboard] WebSocket客户端未运行，正在启动...")
             self.start_monitoring()
+        
+        # 关键修复：在页面顶部显示连接状态
+        connection_col1, connection_col2, connection_col3 = st.columns(3)
+        with connection_col1:
+            status_color = "green" if self.connection_status == "connected" else "red"
+            status_icon = "✅" if self.connection_status == "connected" else "❌"
+            st.markdown(f"**连接状态:** {status_icon} **{self.connection_status.capitalize()}**")
+        
+        with connection_col2:
+            if hasattr(st.session_state, 'last_update_time'):
+                last_update = datetime.fromtimestamp(st.session_state.last_update_time)
+                st.markdown(f"**最后更新:** {last_update.strftime('%H:%M:%S')}")
+            else:
+                st.markdown("**最后更新:** 无")
+        
+        with connection_col3:
+            st.markdown(f"**客户端运行:** {'✅ 是' if self.ws_client.running else '❌ 否'}")
         
         # 添加调试信息
         with st.sidebar:
@@ -696,18 +704,43 @@ class MonitorDashboard:
             st.write(f"实例摘要长度: {len(self.current_summary)}")
             st.write(f"实例适配器: {list(self.current_summary.keys())}")
             
+            # 检查数据一致性
+            if summary_from_session and self.current_summary:
+                if summary_from_session != self.current_summary:
+                    st.warning("⚠️ Session state和实例数据不一致")
+            
             # 手动刷新按钮
             if st.button("🔄 强制刷新", key="force_refresh"):
+                # 尝试从WebSocket客户端获取最新数据
+                latest_data = self.ws_client.latest_data
+                if latest_data and 'data' in latest_data:
+                    self._on_websocket_data(latest_data)
                 st.rerun()
+            
+            # 连接控制
+            st.markdown("---")
+            st.subheader("连接控制")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("🔗 重新连接", use_container_width=True):
+                    if self.ws_client.connected:
+                        self.ws_client.connected = False  # 强制断开
+                    time.sleep(0.5)
+                    self.start_monitoring()
+                    st.success("已尝试重新连接")
+                    st.rerun()
+            
+            with col2:
+                if st.button("📊 测试连接", use_container_width=True):
+                    if self.ws_client.connected:
+                        st.success("连接正常")
+                    else:
+                        st.error("连接断开")
         
         # 侧边栏配置
         with st.sidebar:
             st.header("⚙️ Configuration")
-            
-            # 连接状态显示
-            status_color = "green" if self.connection_status == "connected" else "red"
-            status_icon = "✅" if self.connection_status == "connected" else "❌"
-            st.markdown(f"**Connection:** {status_icon} {self.connection_status.capitalize()}")
             
             # WebSocket服务器配置
             st.subheader("WebSocket Server")
@@ -716,7 +749,6 @@ class MonitorDashboard:
                 if st.button("🔗 Connect", use_container_width=True, key="connect_btn_main"):
                     if self.start_monitoring():
                         st.success("Connected to WebSocket server")
-                        # 等待一下让数据开始流动
                         time.sleep(2)
                         st.rerun()
                     else:
@@ -758,45 +790,46 @@ class MonitorDashboard:
                 key="history_length_slider_main"
             )
             st.session_state.history_length = history_length
-            
-            # 适配器选择 - 优先使用session state中的数据
-            summary = st.session_state.get('current_summary', self.current_summary)
-            
-            # 如果session state中没有数据，尝试从实例获取
-            if not summary:
-                summary = self.current_summary
-            
-            adapter_names = list(summary.keys()) if summary else []
-            
-            if adapter_names:
-                selected_adapters = st.multiselect(
-                    "Select adapters to display",
-                    options=adapter_names,
-                    default=adapter_names,
-                    key="adapter_multiselect_main"
-                )
-                st.session_state.selected_adapters = selected_adapters
-            else:
-                st.info("No adapter data available. Connect to WebSocket server first.")
-                selected_adapters = []
         
-        # 主内容区域
-        # 再次检查数据，因为可能在渲染过程中收到了新数据
-        summary = st.session_state.get('current_summary', self.current_summary)
-        if not summary:
-            summary = self.current_summary
+        # 主内容区域 - 改进的数据检查逻辑
+        # 使用多级数据源，确保总有数据显示
+        display_summary = {}
         
-        adapter_names = list(summary.keys()) if summary else []
+        # 优先级1：最新的WebSocket数据
+        if self.current_summary:
+            display_summary = self.current_summary
+            st.session_state.last_data_source = "current_summary"
+        
+        # 优先级2：session state中的数据
+        elif 'current_summary' in st.session_state and st.session_state.current_summary:
+            display_summary = st.session_state.current_summary
+            st.session_state.last_data_source = "session_state"
+            
+            # 同时更新实例数据（保持同步）
+            self.current_summary = display_summary
+        
+        # 优先级3：从WebSocket客户端缓存获取
+        elif hasattr(self.ws_client, 'latest_data') and self.ws_client.latest_data:
+            latest_data = self.ws_client.latest_data
+            if 'data' in latest_data and 'summary' in latest_data['data']:
+                display_summary = latest_data['data']['summary']
+                st.session_state.last_data_source = "ws_client_cache"
+                
+                # 更新session state和实例数据
+                self.current_summary = display_summary
+                st.session_state.current_summary = display_summary
+        
+        # 获取适配器列表
+        adapter_names = list(display_summary.keys()) if display_summary else []
         
         if adapter_names:
             # 显示数据预览
             with st.expander("📊 数据预览", expanded=True):
                 for adapter in adapter_names:
-                    if adapter in summary:
-                        metrics = summary[adapter]
+                    if adapter in display_summary:
+                        metrics = display_summary[adapter]
                         st.write(f"**{adapter}:**")
                         if isinstance(metrics, dict):
-                            # 显示关键指标
                             col1, col2, col3 = st.columns(3)
                             with col1:
                                 latency = metrics.get('avg_latency_ms', 0)
@@ -818,70 +851,87 @@ class MonitorDashboard:
             ])
             
             with tab1:
-                self._create_overview_tab(summary, adapter_names)
+                self._create_overview_tab(display_summary, adapter_names)
             
             with tab2:
                 self._create_latency_charts_tab(adapter_names, history_length)
             
             with tab3:
-                self._create_detailed_metrics_tab(summary, adapter_names)
+                self._create_detailed_metrics_tab(display_summary, adapter_names)
             
             with tab4:
                 self._create_control_tab()
+                
+            # 显示数据源信息（调试用）
+            if 'last_data_source' in st.session_state:
+                source_info = {
+                    "current_summary": "实时WebSocket数据",
+                    "session_state": "缓存数据",
+                    "ws_client_cache": "客户端缓存"
+                }
+                source = st.session_state.last_data_source
+                st.caption(f"数据来源: {source_info.get(source, source)}")
+                
         else:
+            # 显示"No adapters available"时的改进界面
             st.warning("No adapters available. Please connect to WebSocket server and ensure adapters are running.")
             
-            # 显示详细的调试信息
-            with st.expander("🔍 详细调试信息", expanded=True):
-                st.write(f"连接状态: {self.connection_status}")
-                st.write(f"WebSocket客户端连接: {self.ws_client.connected}")
-                st.write(f"Session state摘要: {list(st.session_state.get('current_summary', {}).keys())}")
-                st.write(f"实例current_summary: {list(self.current_summary.keys())}")
-                
-                # 测试手动触发数据更新
-                if st.button("🧪 测试手动更新", key="test_manual_update"):
-                    test_data = {
-                        'type': 'test',
-                        'timestamp': time.time(),
-                        'data': {
-                            'summary': {
-                                'test_adapter': {
-                                    'avg_latency_ms': 100,
-                                    'success_rate': 0.95,
-                                    'messages_received': 50,
-                                    'is_connected': True
-                                }
-                            }
-                        }
-                    }
-                    self._on_websocket_data(test_data)
-                    st.success("手动发送测试数据到Dashboard")
-                    st.rerun()
+            # 提供更多帮助信息
+            help_col1, help_col2 = st.columns(2)
             
-            # 显示连接指南
-            with st.expander("📖 Connection Guide", expanded=False):
-                st.markdown("""
-                ### How to connect:
-                
-                1. **For system monitoring:**
-                - Make sure the main system is running with WebSocket monitor server
-                - Enter the WebSocket URI (e.g., `ws://localhost:9999/ws`)
-                - Click "Connect"
-                
-                2. **For stress testing:**
-                - Run the stress test with WebSocket server enabled
-                - Enter the WebSocket URI shown in the test output
-                - Click "Connect"
-                
-                3. **Troubleshooting:**
-                - Check if the WebSocket server is running
-                - Verify the URI is correct
-                - Check firewall settings if connecting to remote server
-                """)
+            with help_col1:
+                with st.expander("🔍 诊断信息", expanded=True):
+                    st.write(f"连接状态: {self.connection_status}")
+                    st.write(f"WebSocket连接: {self.ws_client.connected}")
+                    st.write(f"客户端运行: {self.ws_client.running}")
+                    
+                    # 检查最近一次数据接收时间
+                    if hasattr(st.session_state, 'last_update_time'):
+                        elapsed = time.time() - st.session_state.last_update_time
+                        st.write(f"距上次更新: {elapsed:.1f}秒")
+                    
+                    # 显示缓存数据状态
+                    if 'current_summary' in st.session_state:
+                        cached_adapters = list(st.session_state.current_summary.keys())
+                        st.write(f"缓存适配器: {cached_adapters}")
+            
+            with help_col2:
+                with st.expander("🛠️ 修复建议", expanded=True):
+                    st.markdown("""
+                    1. **检查WebSocket服务器是否运行**
+                    - 确保压力测试正在运行
+                    - 检查端口9999是否被占用
+                    
+                    2. **尝试重新连接**
+                    - 点击侧边栏的"重新连接"按钮
+                    - 或点击"Connect"按钮
+                    
+                    3. **检查网络连接**
+                    - 确保本地网络正常
+                    - 检查防火墙设置
+                    
+                    4. **查看日志**
+                    - 检查`dashboard.log`文件
+                    - 查看控制台输出
+                    """)
+            
+            # 立即尝试重新连接
+            if st.button("🔄 立即尝试重新连接并刷新", type="primary"):
+                if not self.ws_client.running:
+                    self.start_monitoring()
+                time.sleep(1)
+                st.rerun()
         
-        # 自动刷新
+        # 自动刷新 - 添加更智能的逻辑
         time.sleep(refresh_rate)
-        st.rerun()
+        
+        # 只有在连接正常时才自动刷新
+        if self.ws_client.connected:
+            st.rerun()
+        else:
+            # 如果连接断开，等待更长时间再尝试刷新
+            time.sleep(3)
+            st.rerun()
     
     def _create_overview_tab(self, summary: Dict, selected_adapters: list):
         """创建概览标签页"""

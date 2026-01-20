@@ -1,0 +1,108 @@
+<!<!DOCTYPE html>
+<html>
+<body>
+    <h1>WebSocket调试工具</h1>
+    
+    <div>
+        <button onclick="connectWebSocket()">连接WebSocket</button>
+        <button onclick="sendPing()">发送Ping</button>
+        <button onclick="startTest()">开始测试</button>
+        <button onclick="getStatus()">获取状态</button>
+    </div>
+    
+    <div>
+        <h3>连接状态:</h3>
+        <div id="status">未连接</div>
+    </div>
+    
+    <div>
+        <h3>消息日志:</h3>
+        <textarea id="log" style="width:100%; height:300px;" readonly></textarea>
+    </div>
+    
+    <script>
+        let ws = null;
+        const log = document.getElementById('log');
+        
+        function addLog(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            log.value += `[${timestamp}] ${message}\n`;
+            log.scrollTop = log.scrollHeight;
+        }
+        
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                addLog('WebSocket已经连接');
+                return;
+            }
+            
+            const url = 'ws://' + window.location.host + '/ws';
+            addLog(`连接WebSocket: ${url}`);
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                addLog('✅ WebSocket连接成功');
+                document.getElementById('status').textContent = '已连接';
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    addLog(`收到消息: ${JSON.stringify(data, null, 2)}`);
+                } catch (e) {
+                    addLog(`收到消息(无法解析): ${event.data}`);
+                }
+            };
+            
+            ws.onclose = () => {
+                addLog('❌ WebSocket连接关闭');
+                document.getElementById('status').textContent = '未连接';
+            };
+            
+            ws.onerror = (error) => {
+                addLog(`❌ WebSocket错误: ${error}`);
+            };
+        }
+        
+        function sendPing() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('WebSocket未连接');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ type: 'ping' }));
+            addLog('发送ping消息');
+        }
+        
+        async function startTest() {
+            try {
+                addLog('开始测试...');
+                const response = await fetch('/api/test/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration_hours: 0.1 }) // 测试6分钟
+                });
+                
+                const result = await response.json();
+                addLog(`测试开始响应: ${JSON.stringify(result)}`);
+            } catch (error) {
+                addLog(`测试开始失败: ${error}`);
+            }
+        }
+        
+        async function getStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const result = await response.json();
+                addLog(`服务状态: ${JSON.stringify(result)}`);
+            } catch (error) {
+                addLog(`获取状态失败: ${error}`);
+            }
+        }
+        
+        // 自动连接
+        setTimeout(connectWebSocket, 1000);
+    </script>
+</body>
+</html>

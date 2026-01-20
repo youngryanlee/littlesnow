@@ -8,6 +8,8 @@ from .adapter_interface import BaseMarketAdapter
 from ..core.data_models import MarketData, ExchangeType
 from ..core.data_models import MarketData, OrderBook, ExchangeType, MarketType, TradeTick
 from ..monitor.collector import MarketMonitor
+from ..utils.time_sync import TimeSyncManager
+
 from logger.logger import get_logger
 
 logger = get_logger()
@@ -20,6 +22,12 @@ class BaseAdapter(BaseMarketAdapter):
         self.exchange_type = exchange_type
         self.subscribed_symbols = set()
         self.monitor = None  # 将稍后设置
+
+        # 创建时间同步管理器
+        self.time_sync = TimeSyncManager(
+            adapter_name=name,       # 适配器名称（用于日志）
+            window_size=100          # 滑动窗口大小（默认100）
+        )
         
     async def subscribe(self, symbols: list):
         """订阅交易对"""
@@ -116,7 +124,13 @@ class BaseAdapter(BaseMarketAdapter):
         latency_ms = received_timestamp_ms - server_timestamp_ms
         # 记录异常情况，但不修正数据
         if latency_ms < 0:
-            logger.warning(f"{message_type} 负延迟: {latency_ms}ms (服务器时间可能比本地晚), server_timestamp_ms={server_timestamp_ms}, received_timestamp_ms={received_timestamp_ms}")
+            #logger.(f"{message_type} 负延迟: {latency_ms}ms (服务器时间可能比本地晚), server_timestamp_ms={server_timestamp_ms}, received_timestamp_ms={received_timestamp_ms}")
+            # 使用TimeSyncManager校正延迟
+            latency_ms = self.time_sync.update_offset(
+                server_timestamp_ms=server_timestamp_ms,
+                received_timestamp_ms=received_timestamp_ms
+            )
+            #logger.info(f"{message_type} 校准延迟: {latency_ms}ms")
             
         elif latency_ms > 10000:  # 10秒
             logger.warning(f"{message_type} 高延迟: {latency_ms}ms (可能网络有问题), server_timestamp_ms={server_timestamp_ms}, received_timestamp_ms={received_timestamp_ms}")
