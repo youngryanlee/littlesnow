@@ -240,7 +240,6 @@ class MonitorService:
                 
                 # 从外部监控器获取指标
                 metrics = self._get_current_metrics()
-                print("========>>>>>>>>metrics:", metrics)
                 
                 # 保存历史
                 if metrics:
@@ -281,7 +280,7 @@ class MonitorService:
         
         try:
             import aiohttp
-            
+
             data = {
                 "type": "metrics_update",
                 "timestamp": datetime.now().isoformat(),

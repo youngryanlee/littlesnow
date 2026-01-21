@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Any, Deque
 from datetime import datetime
 import statistics
 from collections import defaultdict, deque
-import math
 
 from ..core.data_models import ExchangeType
+from ..model.direction_detector import DirectionSignal
 
 class MessageStat:
     """消息统计数据结构"""
@@ -244,6 +244,11 @@ class BinanceMetrics(BaseMetrics):
     validations_failed: int = 0
     validations_warnings: int = 0
 
+    # === T0 Signal ===
+    t0_total: int = 0
+    t0_history: Dict[str, Deque[DirectionSignal]] = field(default_factory=dict, init=False)
+
+
     def __post_init__(self):
         super().__post_init__()
         # Binance特有的消息类型
@@ -262,6 +267,11 @@ class BinanceMetrics(BaseMetrics):
     def avg_pending_buffer(self) -> float:
         """平均pending buffer大小"""
         return statistics.mean(self.pending_buffer_sizes) if self.pending_buffer_sizes else 0.0
+    
+    @property
+    def t0_rate(self) -> float:
+        """验证成功率"""
+        return self.t0_total / self.message_stats['trade'].count if self.message_stats['trade'].count > 0 else 0.0
 
 
 @dataclass

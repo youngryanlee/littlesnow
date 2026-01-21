@@ -439,7 +439,7 @@ class PolymarketAdapter(BaseAdapter):
             return
         
         # 3. 执行订阅
-        logger.info(f"📡 订阅 {subscription_type.value}: {market_ids} -> {len(asset_ids)} 个代币")
+        logger.debug(f"📡 订阅 {subscription_type.value}: market({market_ids}) -> {len(asset_ids)} 个代币")
         
         # 调用原有的 _do_subscribe 方法
         await self._do_subscribe(list(asset_ids), subscription_type)

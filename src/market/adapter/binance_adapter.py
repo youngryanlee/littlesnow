@@ -700,6 +700,17 @@ class BinanceAdapter(BaseAdapter):
             # 添加到recent_trades
             if symbol in self.recent_trades:
                 self.recent_trades[symbol].append(trade_tick)
+
+            # 计算T0信号
+            t0_signal = self.direction_detector.consume(
+                trade=trade_tick,
+                recent_trades=self.recent_trades[symbol],
+                orderbook=self.orderbook_snapshots.get(symbol),
+            )
+
+            if t0_signal:
+                self._record_t0(t0_signal)
+                print("t0_signal:", t0_signal)
             
             # 创建市场数据并触发回调
             market_data = self._create_market_data(

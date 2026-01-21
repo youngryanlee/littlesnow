@@ -47,6 +47,15 @@ class MarketDashboard {
         this.connectWebSocket(); // 自动连接
         this.updateStatus();
         this.startElapsedTimer(); // 启动运行时间计时器
+
+        // 添加折叠状态管理
+        this.collapseStates = {
+            'binance': true, // 默认展开
+            'polymarket': true
+        };
+        
+        // 绑定事件处理方法
+        this._handleToggleClick = this._handleToggleClick.bind(this);
     }
     
     initCharts() {
@@ -384,7 +393,7 @@ class MarketDashboard {
         
         container.innerHTML = '';
         
-        Object.entries(summary).forEach(([adapter, metrics]) => {
+        Object.entries(summary).forEach(([adapter, metrics], index) => {
             const latency = metrics.avg_latency_ms || 0;
             const successRate = (metrics.success_rate || 0) * 100;
             const messages = metrics.messages_received || 0;
@@ -400,92 +409,185 @@ class MarketDashboard {
                 '<i class="bi bi-check-circle-fill text-success"></i>' : 
                 '<i class="bi bi-x-circle-fill text-danger"></i>';
             
-            // 通用指标
-            const commonMetrics = `
-                <div class="row mb-2">
-                    <div class="col-6 text-center">
-                        <h5 class="mb-1">${successRate.toFixed(1)}%</h5>
-                        <small class="text-muted">成功率</small>
-                    </div>
-                    <div class="col-6 text-center">
-                        <h5 class="mb-1">${messages}</h5>
-                        <small class="text-muted">消息数</small>
-                    </div>
-                </div>
-            `;
+            // 获取订阅列表
+            const subscribedSymbols = metrics.subscribed_symbols || [];
+            const subscribedCount = subscribedSymbols.length;
             
-            // 适配器特定指标
+            let commonMetrics = '';
             let specificMetrics = '';
             
-            // Binance 特定指标
+            // Binance 指标
             if (adapter === 'binance' || metrics.adapter_type === 'binance') {
                 const tradeCount = metrics.trade_count || 0;
                 const depthUpdateCount = metrics.depthUpdate_count || 0;
                 const validations = metrics.validations_total || 0;
+                const validationsSuccess = metrics.validations_success || 0;
                 const validationSuccessRate = (metrics.validation_success_rate || 0) * 100;
                 const warnings = metrics.warnings || 0;
+                const avgPendingBuffer = metrics.avg_pending_buffer || 0;
+                const t0Count = metrics.t0_total || 0;
+                const t0Rate = (metrics.t0_rate || 0) * 100;
                 
+                // 消息数详情
+                const messagesDetails = `
+                    <div class="mt-1">
+                        <small class="text-muted d-block mb-1">消息详情：</small>
+                        <div class="d-flex justify-content-center">
+                            <span class="badge bg-info me-1">交易: ${tradeCount}</span>
+                            <span class="badge bg-primary">深度: ${depthUpdateCount}</span>
+                        </div>
+                    </div>
+                `;
+                
+                // 通用指标
+                commonMetrics = `
+                    <div class="row mb-3">
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${successRate.toFixed(1)}%</h5>
+                            <small class="text-muted">成功率</small>
+                        </div>
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${messages}</h5>
+                            <small class="text-muted">总消息数</small>
+                            ${messagesDetails}
+                        </div>
+                    </div>
+                `;
+                
+                // Binance 详细指标
                 specificMetrics = `
-                    <div class="border-top pt-2 mt-2">
-                        <small class="text-muted d-block mb-1">Binance 详细指标</small>
-                        <div class="row g-1 text-center">
-                            <div class="col-4">
-                                <span class="badge bg-info w-100">交易: ${tradeCount}</span>
-                            </div>
-                            <div class="col-4">
-                                <span class="badge bg-primary w-100">深度: ${depthUpdateCount}</span>
-                            </div>
-                            <div class="col-4">
-                                <span class="badge ${warnings > 0 ? 'bg-warning' : 'bg-secondary'} w-100">警告: ${warnings}</span>
+                    <div class="border-top pt-3 mt-3">
+                        <h6 class="mb-3"><i class="bi bi-list-check me-2"></i>Binance 详细指标</h6>
+                        
+                        <!-- 验证信息 -->
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center gx-1"> <!-- 减小列间距 -->
+                                    <div class="col">
+                                        <small class="text-muted d-block">验证次数</small>
+                                        <strong>${validations}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">验证通过</small>
+                                        <strong class="text-success">${validationsSuccess}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">验证失败</small>
+                                        <strong class="text-danger">${metrics.validations_failed || 0}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">验证统计</small>
+                                        <span class="badge ${validationSuccessRate >= 99 ? 'bg-success' : validationSuccessRate >= 95 ? 'bg-warning' : 'bg-danger'}">
+                                            ${validationSuccessRate.toFixed(1)}%
+                                        </span>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                        <div class="row g-1 mt-1 text-center">
-                            <div class="col-6">
-                                <small>验证: ${metrics.validations_success || 0}/${validations}</small>
-                            </div>
-                            <div class="col-6">
-                                <small>验证率: ${validationSuccessRate.toFixed(1)}%</small>
-                            </div>
+                        
+                        <!-- 其他指标 -->
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center gx-1">
+                                    <div class="col">
+                                        <small class="text-muted d-block">警告数</small>
+                                        <strong class="${warnings > 0 ? 'text-warning' : ''}">
+                                            <i class="bi bi-exclamation-triangle me-1"></i>${warnings}
+                                        </strong>
+                                    </div>  
+                                    <div class="col">
+                                        <small class="text-muted d-block">缓冲队列</small>
+                                        <strong>${avgPendingBuffer.toFixed(2)}</strong>
+                                    </div>      
+                                    <div class="col">
+                                        <small class="text-muted d-block">T0 Signal</small>
+                                        <strong>${t0Count}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">T0率</small>
+                                        <strong>${t0Rate.toFixed(1)}%</strong>
+                                    </div>
+                                </div>    
+                            </div>    
                         </div>
                     </div>
                 `;
             }
             
-            // Polymarket 特定指标
+            // Polymarket 指标
             else if (adapter === 'polymarket' || metrics.adapter_type === 'polymarket') {
                 const bookCount = metrics.book_count || 0;
                 const priceChangeCount = metrics.price_change_count || 0;
-                const subscribedCount = (metrics.subscribed_symbols || []).length;
                 
-                // 延迟百分比统计
+                // 消息数详情
+                const messagesDetails = `
+                    <div class="mt-1">
+                        <small class="text-muted d-block mb-1">消息详情：</small>
+                        <div class="d-flex justify-content-center">
+                            <span class="badge bg-info me-1">订单簿: ${bookCount}</span>
+                            <span class="badge bg-primary">价格: ${priceChangeCount}</span>
+                        </div>
+                    </div>
+                `;
+                
+                // 通用指标
+                commonMetrics = `
+                    <div class="row mb-3">
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${successRate.toFixed(1)}%</h5>
+                            <small class="text-muted">成功率</small>
+                        </div>
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${messages}</h5>
+                            <small class="text-muted">总消息数</small>
+                            ${messagesDetails}
+                        </div>
+                    </div>
+                `;
+                
+                // Polymarket 详细指标（只显示延迟分布）
                 const p50 = metrics.p50_latency_ms || 0;
                 const p95 = metrics.p95_latency_ms || 0;
                 const p99 = metrics.p99_latency_ms || 0;
                 
                 specificMetrics = `
-                    <div class="border-top pt-2 mt-2">
-                        <small class="text-muted d-block mb-1">Polymarket 详细指标</small>
-                        <div class="row g-1 text-center">
-                            <div class="col-4">
-                                <span class="badge bg-info w-100">订单簿: ${bookCount}</span>
-                            </div>
-                            <div class="col-4">
-                                <span class="badge bg-primary w-100">价格: ${priceChangeCount}</span>
-                            </div>
-                            <div class="col-4">
-                                <span class="badge bg-secondary w-100">订阅: ${subscribedCount}</span>
+                    <div class="border-top pt-3 mt-3">
+                        <h6 class="mb-3"><i class="bi bi-bar-chart me-2"></i>Polymarket 延迟分布</h6>
+                        
+                        <!-- 延迟分布 -->
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center">
+                                    <div class="col-4">
+                                        <small class="text-muted d-block">P50 延迟</small>
+                                        <strong>${p50.toFixed(0)}ms</strong>
+                                    </div>
+                                    <div class="col-4">
+                                        <small class="text-muted d-block">P95 延迟</small>
+                                        <strong>${p95.toFixed(0)}ms</strong>
+                                    </div>
+                                    <div class="col-4">
+                                        <small class="text-muted d-block">P99 延迟</small>
+                                        <strong>${p99.toFixed(0)}ms</strong>
+                                    </div>
+                                </div>
                             </div>
                         </div>
-                        <div class="row g-1 mt-1 text-center">
-                            <div class="col-4">
-                                <small>P50: ${p50.toFixed(0)}ms</small>
-                            </div>
-                            <div class="col-4">
-                                <small>P95: ${p95.toFixed(0)}ms</small>
-                            </div>
-                            <div class="col-4">
-                                <small>P99: ${p99.toFixed(0)}ms</small>
-                            </div>
+                        
+                        <!-- 延迟对比 -->
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center gx-1">
+                                    <div class="col-6">
+                                        <small class="text-muted d-block">最大延迟</small>
+                                        <strong class="text-danger">${(metrics.max_latency_ms || 0).toFixed(0)}ms</strong>
+                                    </div>
+                                    <div class="col-6">
+                                        <small class="text-muted d-block">最小延迟</small>
+                                        <strong class="text-success">${(metrics.min_latency_ms || 0).toFixed(0)}ms</strong>
+                                    </div>
+                                </div>        
+                            </div>    
                         </div>
                     </div>
                 `;
@@ -493,11 +595,22 @@ class MarketDashboard {
             
             // 未知适配器类型
             else {
-                // 显示所有可用的指标（调试用）
-                const availableMetrics = Object.keys(metrics).length;
+                commonMetrics = `
+                    <div class="row mb-2">
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${successRate.toFixed(1)}%</h5>
+                            <small class="text-muted">成功率</small>
+                        </div>
+                        <div class="col-6 text-center">
+                            <h5 class="mb-1">${messages}</h5>
+                            <small class="text-muted">消息数</small>
+                        </div>
+                    </div>
+                `;
+                
                 specificMetrics = `
                     <div class="border-top pt-2 mt-2">
-                        <small class="text-muted">可用指标: ${availableMetrics} 个</small>
+                        <small class="text-muted">可用指标: ${Object.keys(metrics).length} 个</small>
                         <div class="mt-1">
                             <small class="badge bg-secondary me-1">${metrics.adapter_type || 'unknown'}</small>
                         </div>
@@ -505,23 +618,98 @@ class MarketDashboard {
                 `;
             }
             
+            // 订阅列表部分 - 使用本地存储保存折叠状态
+            let subscribedSection = '';
+            if (subscribedCount > 0) {
+                // 检查折叠状态（先从实例状态获取，然后从本地存储获取）
+                let isCollapsed = this.collapseStates[adapter] === false;
+                
+                // 尝试从本地存储获取状态
+                try {
+                    const storedState = localStorage.getItem(`collapse_${adapter}`);
+                    if (storedState !== null) {
+                        isCollapsed = storedState === 'collapsed';
+                    }
+                } catch (e) {
+                    console.warn('无法访问本地存储:', e);
+                }
+                
+                // 简单的唯一ID
+                const uniqueId = `subscribed-${adapter}-${index}`;
+                
+                // 决定初始状态和图标
+                const collapseClass = isCollapsed ? '' : 'show';
+                const buttonIcon = isCollapsed ? 'bi-chevron-down' : 'bi-chevron-up';
+                
+                subscribedSection = `
+                    <div class="border-top pt-3 mt-3">
+                        <div class="d-flex justify-content-between align-items-center mb-2">
+                            <h6 class="mb-0">
+                                <i class="bi bi-list-ul me-2"></i>
+                                订阅列表 <span class="badge bg-secondary">${subscribedCount}</span>
+                            </h6>
+                            <button class="btn btn-sm btn-outline-secondary subscription-toggle" 
+                                    type="button" 
+                                    data-adapter="${adapter}"
+                                    data-target="#${uniqueId}">
+                                <i class="bi ${buttonIcon}"></i>
+                            </button>
+                        </div>
+                        <div class="collapse ${collapseClass}" id="${uniqueId}">
+                            <div class="subscribed-symbols">
+                                ${subscribedSymbols.map((symbol, idx) => {
+                                    // 简短的显示，完整内容在title中
+                                    const shortSymbol = symbol.length > 12 ? symbol.substring(0, 12) + '...' : symbol;
+                                    return `
+                                    <div class="d-flex align-items-center mb-1">
+                                        <span class="badge bg-light text-dark border me-2" 
+                                            title="${symbol}"
+                                            style="max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                            ${shortSymbol}
+                                        </span>
+                                        <small class="text-muted">${idx + 1}</small>
+                                    </div>
+                                    `;
+                                }).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                subscribedSection = `
+                    <div class="border-top pt-3 mt-3">
+                        <div class="text-center text-muted py-2">
+                            <i class="bi bi-info-circle me-2"></i>
+                            无订阅列表
+                        </div>
+                    </div>
+                `;
+            }
+            
             const card = `
-                <div class="col-lg-4 col-md-6 mb-4">
-                    <div class="card h-100 shadow-sm hover-shadow">
+                <div class="col-lg-6 col-md-12 mb-4">
+                    <div class="card h-100">
                         <div class="card-header d-flex justify-content-between align-items-center">
-                            <h6 class="mb-0">${adapter.toUpperCase()}</h6>
+                            <div>
+                                <h5 class="mb-0">${adapter.toUpperCase()}</h5>
+                                <small class="text-muted">${metrics.adapter_type || adapter}</small>
+                            </div>
                             <div class="d-flex align-items-center">
-                                <span class="badge bg-${isConnected ? 'success' : 'danger'} me-2">
+                                <span class="badge bg-${isConnected ? 'success' : 'danger'} me-2 px-3 py-1">
                                     ${isConnected ? '已连接' : '未连接'}
                                 </span>
                                 ${connectionIcon}
                             </div>
                         </div>
+                        
                         <div class="card-body">
                             <!-- 延迟显示 -->
-                            <div class="text-center mb-3">
-                                <h2 class="text-${latencyColor}">${latency.toFixed(1)}</h2>
-                                <small class="text-muted">平均延迟 (ms)</small>
+                            <div class="text-center mb-4">
+                                <div class="d-flex justify-content-center align-items-end">
+                                    <h1 class="text-${latencyColor} display-5 me-2">${latency.toFixed(1)}</h1>
+                                    <small class="text-muted">ms</small>
+                                </div>
+                                <small class="text-muted">平均延迟</small>
                             </div>
                             
                             <!-- 通用指标 -->
@@ -529,15 +717,19 @@ class MarketDashboard {
                             
                             <!-- 适配器特定指标 -->
                             ${specificMetrics}
+                            
+                            <!-- 订阅列表 -->
+                            ${subscribedSection}
                         </div>
-                        <div class="card-footer">
+                        
+                        <div class="card-footer bg-transparent border-top-0">
                             <div class="d-flex justify-content-between align-items-center">
                                 <small class="text-muted">
                                     <i class="bi bi-clock me-1"></i>
-                                    ${new Date().toLocaleTimeString()}
+                                    更新: ${new Date().toLocaleTimeString()}
                                 </small>
                                 <small class="text-muted">
-                                    最大延迟: ${(metrics.max_latency_ms || 0).toFixed(0)}ms
+                                    最大延迟: <span class="${metrics.max_latency_ms > 1000 ? 'text-danger' : 'text-muted'}">${(metrics.max_latency_ms || 0).toFixed(0)}ms</span>
                                 </small>
                             </div>
                         </div>
@@ -558,6 +750,92 @@ class MarketDashboard {
                 </div>
             `;
         }
+        
+        // 重新绑定折叠按钮事件
+        this._bindSubscriptionToggleEvents();
+    }
+
+    // 绑定订阅列表折叠按钮事件
+    _bindSubscriptionToggleEvents() {
+        // 移除旧的事件监听器
+        const oldButtons = document.querySelectorAll('.subscription-toggle');
+        oldButtons.forEach(button => {
+            button.removeEventListener('click', this._handleToggleClick);
+        });
+        
+        // 绑定新的事件
+        const buttons = document.querySelectorAll('.subscription-toggle');
+        buttons.forEach(button => {
+            button.addEventListener('click', this._handleToggleClick);
+        });
+    }
+
+    // 手动初始化折叠功能的辅助方法
+    _initializeCollapse() {
+        // 为所有折叠按钮添加点击事件
+        const toggleButtons = document.querySelectorAll('.toggle-subscriptions');
+        
+        toggleButtons.forEach(button => {
+            // 移除之前的事件监听器，避免重复绑定
+            button.removeEventListener('click', this._handleToggleClick);
+            
+            // 添加新的点击事件
+            button.addEventListener('click', this._handleToggleClick.bind(this));
+        });
+    }
+
+    // 处理折叠按钮点击事件
+    _handleToggleClick(event) {
+        const button = event.currentTarget;
+        const adapter = button.getAttribute('data-adapter');
+        const targetId = button.getAttribute('data-target');
+        const targetElement = document.querySelector(targetId);
+        const icon = button.querySelector('i');
+        
+        if (targetElement) {
+            // 切换显示/隐藏
+            if (targetElement.classList.contains('show')) {
+                // 折叠
+                targetElement.classList.remove('show');
+                icon.classList.remove('bi-chevron-up');
+                icon.classList.add('bi-chevron-down');
+                // 保存状态到本地存储
+                this._saveCollapseState(adapter, 'collapsed');
+            } else {
+                // 展开
+                targetElement.classList.add('show');
+                icon.classList.remove('bi-chevron-down');
+                icon.classList.add('bi-chevron-up');
+                // 保存状态到本地存储
+                this._saveCollapseState(adapter, 'expanded');
+            }
+        }
+    }
+
+    // 保存折叠状态到本地存储
+    _saveCollapseState(adapter, state) {
+        try {
+            localStorage.setItem(`collapse_${adapter}`, state);
+            // 同时更新实例状态
+            this.collapseStates[adapter] = state === 'expanded';
+        } catch (e) {
+            console.warn('无法保存到本地存储:', e);
+        }
+    }
+
+    // 获取折叠状态
+    _getCollapseState(adapter) {
+        try {
+            const storedState = localStorage.getItem(`collapse_${adapter}`);
+            if (storedState !== null) {
+                return storedState === 'expanded';
+            }
+        } catch (e) {
+            console.warn('无法从本地存储读取:', e);
+        }
+        
+        // 默认展开
+        return true;
     }
     
     updateMetricsTable(summary) {
@@ -707,13 +985,34 @@ class MarketDashboard {
             return;
         }
         
+        // 获取开始时间
+        let startTimeDisplay = 'N/A';
+        if (this.startTime) {
+            startTimeDisplay = new Date(this.startTime).toLocaleTimeString();
+        } else if (testInfo && testInfo.start_time) {
+            startTimeDisplay = new Date(testInfo.start_time).toLocaleTimeString();
+        }
+        
+        // 计算已运行时间
+        let elapsedTimeDisplay = '00:00:00';
+        if (testInfo && testInfo.elapsed_hours) {
+            const elapsedSeconds = testInfo.elapsed_hours * 3600;
+            elapsedTimeDisplay = this.formatDuration(elapsedSeconds);
+        } else if (this.startTime) {
+            const elapsedSeconds = (Date.now() - this.startTime) / 1000;
+            elapsedTimeDisplay = this.formatDuration(elapsedSeconds);
+        }
+        
         // 移除状态显示，因为顶部和左侧已经有了
         let additionalInfo = '';
         if (testInfo && testInfo.duration_hours) {
+            // 将小时转换为秒
+            const durationSeconds = testInfo.duration_hours * 3600;
+            const durationFormatted = this.formatDuration(durationSeconds);
             additionalInfo = `
                 <div class="mb-2">
                     <small class="text-muted">预设时长:</small>
-                    <div><strong>${this.formatDuration(testInfo.duration_hours)}</strong></div>
+                    <div><strong>${durationFormatted}</strong></div>
                 </div>
             `;
         }
@@ -723,17 +1022,50 @@ class MarketDashboard {
             ${additionalInfo}
             <div class="mb-2">
                 <small class="text-muted">启动时间:</small>
-                <div><strong id="start-time">${new Date(this.startTime).toLocaleTimeString()}</strong></div>
+                <div><strong id="start-time">${startTimeDisplay}</strong></div>
             </div>
             <div class="mb-2">
                 <small class="text-muted">已运行:</small>
-                <div><strong id="elapsed-time">00:00:00</strong></div>
+                <div><strong id="elapsed-time">${elapsedTimeDisplay}</strong></div>
             </div>
             <div class="mb-2">
                 <small class="text-muted">总数据点:</small>
-                <div><strong id="total-data-points">${this.totalDataPoints}</strong></div>
+                <div><strong id="total-data-points">${this.totalDataPoints || 0}</strong></div>
             </div>
         `;
+        
+        // 同时更新顶部栏的状态信息
+        this._updateHeaderStats(testInfo);
+    }
+
+    // 新增方法：更新顶部状态栏
+    _updateHeaderStats(testInfo) {
+        const statusElement = document.getElementById('status-indicator');
+        const durationElement = document.getElementById('current-duration');
+        
+        if (!statusElement || !durationElement) {
+            return;
+        }
+        
+        // 更新状态
+        const isMonitoring = testInfo && testInfo.is_monitoring;
+        const statusText = isMonitoring ? '运行中' : '已停止';
+        const statusClass = isMonitoring ? 'bg-success' : 'bg-secondary';
+        const statusIcon = isMonitoring ? 'bi-play-circle' : 'bi-stop-circle';
+        
+        statusElement.innerHTML = `
+            <span class="badge ${statusClass}">
+                <i class="bi ${statusIcon} me-1"></i>${statusText}
+            </span>
+        `;
+        
+        // 更新时长
+        if (testInfo && testInfo.elapsed_hours) {
+            const elapsedSeconds = testInfo.elapsed_hours * 3600;
+            durationElement.textContent = `已运行: ${this.formatDuration(elapsedSeconds)}`;
+        } else {
+            durationElement.textContent = '未运行';
+        }
     }
 
     updateAdaptersToOffline() {
@@ -965,6 +1297,34 @@ class MarketDashboard {
         };
         
         return colors[adapter] || colors.default;
+    }
+
+    formatDuration(seconds) {
+        if (seconds === undefined || seconds === null) {
+            return '00:00:00';
+        }
+        
+        const hours = Math.floor(seconds / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        const secs = Math.floor(seconds % 60);
+        
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        } else if (minutes > 0) {
+            return `${minutes}:${secs.toString().padStart(2, '0')}`;
+        } else {
+            return `0:${secs.toString().padStart(2, '0')}`;
+        }
+    }
+
+    formatTime(seconds) {
+        if (seconds >= 3600) {
+            return `${(seconds / 3600).toFixed(1)}小时`;
+        } else if (seconds >= 60) {
+            return `${(seconds / 60).toFixed(1)}分钟`;
+        } else {
+            return `${seconds}秒`;
+        }
     }
 }
 

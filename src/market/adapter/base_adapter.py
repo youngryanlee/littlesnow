@@ -8,6 +8,7 @@ from .adapter_interface import BaseMarketAdapter
 from ..core.data_models import MarketData, ExchangeType
 from ..core.data_models import MarketData, OrderBook, ExchangeType, MarketType, TradeTick
 from ..monitor.collector import MarketMonitor
+from ..model.direction_detector import DirectionDetector, DirectionSignal
 from ..utils.time_sync import TimeSyncManager
 
 from logger.logger import get_logger
@@ -28,6 +29,8 @@ class BaseAdapter(BaseMarketAdapter):
             adapter_name=name,       # 适配器名称（用于日志）
             window_size=100          # 滑动窗口大小（默认100）
         )
+
+        self.direction_detector = DirectionDetector()
         
     async def subscribe(self, symbols: list):
         """订阅交易对"""
@@ -207,4 +210,12 @@ class BaseAdapter(BaseMarketAdapter):
             self.monitor.record_connection_status(
                 adapter_name=self.name,
                 is_connected=is_connected
+            )    
+
+    def _record_t0(self, signal: DirectionSignal):
+        """触发t0信号（内部方法）"""
+        if self.monitor:
+            self.monitor.record_t0(
+                adapter_name=self.name,
+                signal=signal
             )    

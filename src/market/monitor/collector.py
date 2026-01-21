@@ -3,13 +3,16 @@ import time
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from dataclasses import asdict
-import statistics
+from collections import defaultdict, deque
 
 from .metrics import AdapterMetrics, BaseMetrics, BinanceMetrics, PolymarketMetrics
+from ..model.direction_detector import DirectionSignal
 
 
 class MarketMonitor:
     """统一的市场数据监控器"""
+
+    MAX_LEN = 1000
     
     def __init__(self):
         self.metrics: Dict[str, AdapterMetrics] = {}
@@ -47,8 +50,8 @@ class MarketMonitor:
         metrics.latency_ms.append(latency_ms)
         
         # 保持最近数据
-        if len(metrics.latency_ms) > 1000:
-            metrics.latency_ms.pop(0)
+        if len(metrics.latency_ms) > self.MAX_LEN:
+            metrics.latency_ms.pop(0)       
     
     def record_processing_time(self, adapter_name: str, processing_ms: float) -> None:
         """记录处理时间"""
@@ -58,7 +61,7 @@ class MarketMonitor:
         metrics = self.metrics[adapter_name]
         metrics.processing_ms.append(processing_ms)
         
-        if len(metrics.processing_ms) > 1000:
+        if len(metrics.processing_ms) > self.MAX_LEN:
             metrics.processing_ms.pop(0)
     
     def record_connection_status(self, adapter_name: str, is_connected: bool) -> None:
@@ -92,7 +95,7 @@ class MarketMonitor:
             # 记录验证时间
             if 'last_verification_time' in details:
                 binance_metrics.validation_time.append(details['last_verification_time'])
-                if len(binance_metrics.validation_time) > 1000:
+                if len(binance_metrics.validation_time) > self.MAX_LEN:
                     binance_metrics.validation_time.pop(0)
     
     def record_pending_buffer(self, adapter_name: str, buffer_size: int) -> None:
@@ -106,8 +109,28 @@ class MarketMonitor:
             binance_metrics = metrics.data
             binance_metrics.pending_buffer_sizes.append(buffer_size)
             
-            if len(binance_metrics.pending_buffer_sizes) > 1000:
+            if len(binance_metrics.pending_buffer_sizes) > self.MAX_LEN:
                 binance_metrics.pending_buffer_sizes.pop(0)
+
+    def record_t0(self, adapter_name: str, signal: DirectionSignal):
+        """触发t0信号（内部方法）"""
+
+        if adapter_name not in self.metrics:
+            return
+        
+        metrics = self.metrics[adapter_name]
+        
+        if metrics.is_binance():
+            binance_metrics = metrics.data
+            binance_metrics.t0_total += 1
+
+            if signal.symbol not in binance_metrics.t0_history:
+                # 自动创建新的t0队列
+                binance_metrics.t0_history[signal.symbol] = deque(maxlen=self.MAX_LEN)
+
+            binance_metrics.t0_history[signal.symbol].append(signal)
+            
+            
     
     # === Polymarket特有监控方法 ===
     
@@ -167,6 +190,8 @@ class MarketMonitor:
                     'validations_success': data.validations_success,
                     'validations_failed': data.validations_failed,
                     'warnings': data.validations_warnings,
+                    't0_total': data.t0_total,
+                    't0_rate': data.t0_rate,
                 })
             
             # Polymarket特有指标
