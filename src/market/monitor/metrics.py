@@ -2,11 +2,13 @@
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Deque
 from datetime import datetime
+import time
+from decimal import Decimal
 import statistics
 from collections import defaultdict, deque
 
 from ..core.data_models import ExchangeType
-from ..model.direction_detector import DirectionSignal
+from .direction_detector_monitor import DirectionDetectorMonitor
 
 class MessageStat:
     """消息统计数据结构"""
@@ -244,9 +246,8 @@ class BinanceMetrics(BaseMetrics):
     validations_failed: int = 0
     validations_warnings: int = 0
 
-    # === T0 Signal ===
-    t0_total: int = 0
-    t0_history: Dict[str, Deque[DirectionSignal]] = field(default_factory=dict, init=False)
+    # === T0 Signal指标 ===
+    t0_monitor: DirectionDetectorMonitor = DirectionDetectorMonitor()
 
 
     def __post_init__(self):
@@ -270,8 +271,8 @@ class BinanceMetrics(BaseMetrics):
     
     @property
     def t0_rate(self) -> float:
-        """验证成功率"""
-        return self.t0_total / self.message_stats['trade'].count if self.message_stats['trade'].count > 0 else 0.0
+        """t0信号率"""
+        return self.t0_monitor.total_signals / self.message_stats['trade'].count if self.message_stats['trade'].count > 0 else 0.0
 
 
 @dataclass

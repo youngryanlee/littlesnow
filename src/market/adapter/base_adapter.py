@@ -120,7 +120,9 @@ class BaseAdapter(BaseMarketAdapter):
             self.monitor.register_adapter(
                 adapter_name=self.name,
                 exchange_type=self.exchange_type,
-            )  
+            )
+
+            self.direction_detector.set_monitor(monitor.get_direction_detector_monitor(self.name))
         
     def _update_monitor_stats(self, message_type: str, server_timestamp_ms: int, received_timestamp_ms: int):
 
@@ -211,11 +213,4 @@ class BaseAdapter(BaseMarketAdapter):
                 adapter_name=self.name,
                 is_connected=is_connected
             )    
-
-    def _record_t0(self, signal: DirectionSignal):
-        """触发t0信号（内部方法）"""
-        if self.monitor:
-            self.monitor.record_t0(
-                adapter_name=self.name,
-                signal=signal
-            )    
+            

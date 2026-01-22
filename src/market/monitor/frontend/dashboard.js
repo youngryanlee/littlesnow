@@ -418,6 +418,43 @@ class MarketDashboard {
             
             // Binance 指标
             if (adapter === 'binance' || metrics.adapter_type === 'binance') {
+                /*
+                {
+                    'adapter_type': 'binance',
+                    'is_connected': True,
+                    'connection_errors': 0,
+                    'avg_latency_ms': 1.4641418175194065,
+                    'max_latency_ms': 3960,
+                    'p50_latency_ms': 6,
+                    'p95_latency_ms': 418,
+                    'p99_latency_ms': 650,
+                    'error_rate': 0.0,
+                    'messages_received': 2177,
+                    'messages_processed': 2177,
+                    'errors': 0,
+                    'subscribed_symbols': ['ETHUSDT', 'BTCUSDT'],
+                    'success_rate': 1.0,
+                    'validation_success_rate': 1.0,
+                    'avg_pending_buffer': 0.0,
+                    'validations_total': 6,
+                    'validations_success': 6,
+                    'validations_failed': 0,
+                    'warnings': 26,
+                    'total_signals': 2,
+                    't0_rate': 0.001084010840108401,
+                    'false_positive_rate': 0.0,
+                    'avg_signals_per_minute': 5.8397002287215924,
+                    'avg_signal_interval': 2177,
+                    'avg_cooldown_interval': 17.545454545454547,
+                    'up_percent': 1.0,
+                    'down_percent': 0.0,
+                    'recent_signals_per_minute': 2.0,
+                    'recent_transitions_per_minute': 4.0,
+                    'recent_signal_interval': 2177,
+                    'recent_up_percent': 1.0,
+                    'recent_down_percent': 0.0
+                }
+                */
                 const tradeCount = metrics.trade_count || 0;
                 const depthUpdateCount = metrics.depthUpdate_count || 0;
                 const validations = metrics.validations_total || 0;
@@ -425,8 +462,24 @@ class MarketDashboard {
                 const validationSuccessRate = (metrics.validation_success_rate || 0) * 100;
                 const warnings = metrics.warnings || 0;
                 const avgPendingBuffer = metrics.avg_pending_buffer || 0;
-                const t0Count = metrics.t0_total || 0;
+
+                // T0信息
+                // 整体统计 
+                const t0Count = metrics.total_signals || 0;
                 const t0Rate = (metrics.t0_rate || 0) * 100;
+                const falsePositiveRate = (metrics.false_positive_rate || 0) * 100;
+                const t0AvgPerMinute = metrics.avg_signals_per_minute || 0;
+                const avgSignalInterval = metrics.avg_signal_interval || 0;
+                const avgCooldownInterval = metrics.avg_cooldown_interval || 0;
+                const upPercent = (metrics.up_percent || 0) * 100;
+                const downPercent = (metrics.down_percent || 0) * 100;
+                // 最近1分钟统计
+                const t0RecentPerMinute = metrics.recent_signals_per_minute || 0;
+                const recentTransitionsPerMinute = metrics.recent_transitions_per_minute || 0;
+                const recentSignalInterval = metrics.recent_signal_interval || 0;
+                const recentUpPercent = (metrics.recent_up_percent || 0) * 100;
+                const recentDownPercent = (metrics.recent_down_percent || 0) * 100;
+                
                 
                 // 消息数详情
                 const messagesDetails = `
@@ -481,14 +534,6 @@ class MarketDashboard {
                                             ${validationSuccessRate.toFixed(1)}%
                                         </span>
                                     </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <!-- 其他指标 -->
-                        <div class="row mb-3">
-                            <div class="col-12">
-                                <div class="row text-center gx-1">
                                     <div class="col">
                                         <small class="text-muted d-block">警告数</small>
                                         <strong class="${warnings > 0 ? 'text-warning' : ''}">
@@ -499,13 +544,63 @@ class MarketDashboard {
                                         <small class="text-muted d-block">缓冲队列</small>
                                         <strong>${avgPendingBuffer.toFixed(2)}</strong>
                                     </div>      
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 其他指标 -->
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center gx-1">
                                     <div class="col">
                                         <small class="text-muted d-block">T0 Signal</small>
                                         <strong>${t0Count}</strong>
                                     </div>
                                     <div class="col">
                                         <small class="text-muted d-block">T0率</small>
-                                        <strong>${t0Rate.toFixed(1)}%</strong>
+                                        <strong>${t0Rate.toFixed(2)}%</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">平均T0/min</small>
+                                        <strong>${t0AvgPerMinute.toFixed(2)}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">平均T0间隔</small>
+                                        <strong>${avgSignalInterval.toFixed(0)}ms</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">平均冷却</small>
+                                        <strong>${avgCooldownInterval.toFixed(0)}ms</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">Up率</small>
+                                        <strong>${upPercent.toFixed(1)}%</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">Down率</small>
+                                        <strong>${downPercent.toFixed(1)}%</strong>
+                                    </div>
+                                </div>    
+                            </div>    
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-12">
+                                <div class="row text-center gx-1">
+                                    <div class="col">
+                                        <small class="text-muted d-block">最近1分钟T0</small>
+                                        <strong>${t0RecentPerMinute.toFixed(0)}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">最近信号间隔</small>
+                                        <strong>${recentSignalInterval.toFixed(0)}</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">最近Up率</small>
+                                        <strong>${recentUpPercent.toFixed(1)}%</strong>
+                                    </div>
+                                    <div class="col">
+                                        <small class="text-muted d-block">最近Down率</small>
+                                        <strong>${recentDownPercent.toFixed(1)}%</strong>
                                     </div>
                                 </div>    
                             </div>    

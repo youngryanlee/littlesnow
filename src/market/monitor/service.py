@@ -6,8 +6,6 @@ import asyncio
 import subprocess
 import threading
 import time
-import logging
-import signal
 import os
 import sys
 from typing import Dict, Any, Optional, List
@@ -270,7 +268,7 @@ class MonitorService:
         try:
             return self.monitor.get_summary()
         except Exception as e:
-            logger.error(f"获取外部监控器指标失败: {e}")
+            logger.error(f"获取外部监控器指标失败: {e}", exc_info=True)
             return {}
     
     async def _push_metrics_to_server(self, metrics: Dict[str, Any], elapsed_hours: Optional[float] = None):

@@ -449,7 +449,7 @@ class BinanceAdapter(BaseAdapter):
                             # 启动验证任务，每秒验证一次（可根据需要调整间隔）
                             self.start_verification(symbol, interval_seconds=1)
                     except Exception as e:
-                        logger.error(f"Failed to start verification for {symbol}: {e}Error messageClick to retry")
+                        logger.error(f"Failed to start verification for {symbol}: {e}")
                 else:
                     logger.error(f"{symbol}: Initialization failed")
                     fail_symbols.append(symbol)
@@ -707,10 +707,6 @@ class BinanceAdapter(BaseAdapter):
                 recent_trades=self.recent_trades[symbol],
                 orderbook=self.orderbook_snapshots.get(symbol),
             )
-
-            if t0_signal:
-                self._record_t0(t0_signal)
-                print("t0_signal:", t0_signal)
             
             # 创建市场数据并触发回调
             market_data = self._create_market_data(

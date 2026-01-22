@@ -112,23 +112,17 @@ class MarketMonitor:
             if len(binance_metrics.pending_buffer_sizes) > self.MAX_LEN:
                 binance_metrics.pending_buffer_sizes.pop(0)
 
-    def record_t0(self, adapter_name: str, signal: DirectionSignal):
-        """触发t0信号（内部方法）"""
-
+    def get_direction_detector_monitor(self, adapter_name: str) -> AdapterMetrics:
+        """记录延迟"""
         if adapter_name not in self.metrics:
-            return
+            return None
         
         metrics = self.metrics[adapter_name]
         
         if metrics.is_binance():
-            binance_metrics = metrics.data
-            binance_metrics.t0_total += 1
-
-            if signal.symbol not in binance_metrics.t0_history:
-                # 自动创建新的t0队列
-                binance_metrics.t0_history[signal.symbol] = deque(maxlen=self.MAX_LEN)
-
-            binance_metrics.t0_history[signal.symbol].append(signal)
+            return metrics.data.t0_monitor
+        else:
+            return None             
             
             
     
@@ -190,9 +184,29 @@ class MarketMonitor:
                     'validations_success': data.validations_success,
                     'validations_failed': data.validations_failed,
                     'warnings': data.validations_warnings,
-                    't0_total': data.t0_total,
-                    't0_rate': data.t0_rate,
                 })
+
+                # t0指标
+                t0_metrics = data.t0_monitor.calculate_metrics()
+                base_summary.update({
+                    # 整体统计
+                    'total_signals': t0_metrics['total_signals'],
+                    't0_rate': data.t0_rate,
+                    'false_positive_rate': t0_metrics['false_positive_rate'],
+                    'avg_signals_per_minute': t0_metrics['avg_signals_per_minute'],
+                    'avg_signal_interval': t0_metrics['signal_intervals']['all_time'].get('avg_interval_ms'),
+                    'avg_cooldown_interval': t0_metrics['cooldown_stats'].get('mean'),
+                    'up_percent': t0_metrics['direction_distribution']['all_time'].get('up_percentage'),
+                    'down_percent': t0_metrics['direction_distribution']['all_time'].get('down_percentage'),
+
+                    #最近一分钟统计
+                    'recent_signals_per_minute': t0_metrics['recent_signals_per_minute'],
+                    'recent_transitions_per_minute': t0_metrics['recent_transitions_per_minute'],   
+                    'recent_signal_interval': t0_metrics['signal_intervals']['recent_1min'].get('avg_interval_ms'),
+                    'recent_up_percent': t0_metrics['direction_distribution']['recent_1min'].get('up_percentage'),
+                    'recent_down_percent': t0_metrics['direction_distribution']['recent_1min'].get('down_percentage'),
+                })
+
             
             # Polymarket特有指标
             elif metrics.is_polymarket():
@@ -226,3 +240,4 @@ class MarketMonitor:
             result['polymarket_specific'] = asdict(metrics.data)
         
         return result
+    
