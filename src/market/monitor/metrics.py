@@ -25,10 +25,6 @@ class MessageStat:
     last_update: Optional[int] = None  # 存储时间戳（毫秒）
     errors: int = 0
     
-    def __post_init__(self):
-        if self.latency_min == float('inf'):
-            self.latency_min = 0.0
-    
     def update(self, latency_ms: float, timestamp: datetime):
         """更新统计"""
         self.count += 1
@@ -207,6 +203,12 @@ class BaseMetrics:
         """最大延迟"""
         stats = self.message_stats.get("all")
         return stats.latency_max if stats else 0.0
+    
+    @property
+    def min_latency(self) -> float:
+        """最大延迟"""
+        stats = self.message_stats.get("all")
+        return stats.latency_min if stats else 0.0
     
     # 修改获取属性，实时计算
     @property

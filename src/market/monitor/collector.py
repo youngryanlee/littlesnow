@@ -163,6 +163,7 @@ class MarketMonitor:
                 'connection_errors': data.connection_errors,
                 'avg_latency_ms': data.avg_latency,
                 'max_latency_ms': data.max_latency,
+                'min_latency_ms': data.min_latency,
                 'p50_latency_ms': data.p50_latency,
                 'p95_latency_ms': data.p95_latency,
                 'p99_latency_ms': data.p99_latency,
