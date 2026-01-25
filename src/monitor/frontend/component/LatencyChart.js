@@ -1,3 +1,5 @@
+import { markRaw } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";;
+
 export default {
     template: `
         <div class="card mb-4">
@@ -44,47 +46,40 @@ export default {
 
     watch: {
         chartData: {
-            immediate: true, // 立即执行一次
+            immediate: true,
             handler(newData) {
                 console.log('📡 LatencyChart 数据更新:', newData);
-                
+
                 if (!this.mountedReady) {
                     console.log('组件未就绪，等待 mounted');
                     return;
                 }
-                
-                // 检查数据是否有效
+
                 const hasData = this.checkDataHasContent(newData);
                 console.log('数据有效性检查:', hasData ? '有数据' : '无数据');
-                
+
                 if (!hasData) {
                     this.showPlaceholder = true;
                     this.chartStatus = '等待数据...';
                     return;
                 }
-                
+
                 // 计算数据哈希，检查是否真的变化了
                 const newHash = this.calculateDataHash(newData);
                 console.log('数据哈希:', newHash.substring(0, 20) + '...');
-                
-                if (newHash === this.lastDataHash && this.chart) {
-                    console.log('数据未变化，跳过更新');
+
+                if (newHash === this.lastDataHash) {
+                    console.log('数据未变化，跳过');
                     return;
                 }
-                
+
                 this.lastDataHash = newHash;
                 this.showPlaceholder = false;
                 this.chartStatus = '更新图表...';
-                
-                // 使用 $nextTick 确保 DOM 更新完成
+
                 this.$nextTick(() => {
-                    if (!this.chart) {
-                        console.log('图表未初始化，初始化图表');
-                        this.initChart(newData);
-                    } else {
-                        console.log('图表已存在，更新图表');
-                        this.updateChart(newData);
-                    }
+                    // ⭐ 不走 update 路径，永远重建
+                    this.initChart(newData);
                 });
             }
         }
@@ -92,42 +87,30 @@ export default {
 
     methods: {
         checkDataHasContent(data) {
-            if (!data || typeof data !== 'object') {
-                return false;
-            }
-            
             // 检查是否有任何适配器有数据
-            return Object.values(data).some(adapterData => {
-                return Array.isArray(adapterData) && adapterData.length > 0;
-            });
+            if (!data || typeof data !== 'object') return false;
+            return Object.values(data).some(
+                v => Array.isArray(v) && v.length > 0
+            );
         },
-        
+
         calculateDataHash(data) {
             if (!data) return '';
-            
-            // 简单的哈希计算
             const hashData = {};
-            Object.entries(data).forEach(([adapter, points]) => {
-                if (Array.isArray(points) && points.length > 0) {
-                    hashData[adapter] = points.slice(-5); // 只取最后5个点计算哈希
+            Object.entries(data).forEach(([k, v]) => {
+                if (Array.isArray(v) && v.length > 0) {
+                    hashData[k] = v.slice(-5);
                 }
             });
-            
             return JSON.stringify(hashData);
         },
 
         buildDatasets(raw) {
-            console.log('🔨 构建数据集, 输入类型:', typeof raw, '内容:', raw);
-            
-            if (!raw || typeof raw !== 'object') {
-                console.warn('输入数据无效');
-                return [];
-            }
-            
-            // 转换为普通对象
+            if (!raw || typeof raw !== 'object') return [];
+
+            // ⭐ 关键：彻底去 Proxy
             const data = JSON.parse(JSON.stringify(raw));
-            console.log('转换后数据:', data);
-            
+
             const colors = {
                 binance: '#f0b90b',
                 polymarket: '#8b5cf6',
@@ -135,166 +118,95 @@ export default {
             };
 
             const datasets = [];
-            
-            Object.entries(data).forEach(([adapterName, adapterData]) => {
-                console.log(`  处理适配器 ${adapterName}:`, adapterData);
-                
-                if (!Array.isArray(adapterData) || adapterData.length === 0) {
-                    console.log(`  ⚠️ ${adapterName}: 数据不是数组或为空`);
-                    return;
-                }
-                
-                console.log(`  ✅ ${adapterName}: 有 ${adapterData.length} 个数据点`);
-                
-                // 处理每个数据点，确保格式正确
-                const processedData = adapterData.map((point, index) => {
-                    if (point && typeof point === 'object') {
-                        // 确保有 x 和 y 属性
-                        return {
-                            x: point.x || index,
-                            y: point.y || 0
-                        };
-                    }
-                    // 如果是数字，使用索引作为 x
-                    return { x: index, y: point || 0 };
-                });
-                
-                console.log(`  ${adapterName} 处理后的数据:`, processedData.slice(0, 3)); // 显示前3个点
-                
+
+            Object.entries(data).forEach(([name, arr]) => {
+                if (!Array.isArray(arr) || arr.length === 0) return;
+
+                const points = arr.map((p, i) => ({
+                    x: typeof p === 'object' ? p.x ?? i : i,
+                    y: typeof p === 'object' ? p.y ?? 0 : p ?? 0
+                }));
+
                 datasets.push({
-                    label: adapterName,
-                    data: processedData,
-                    borderColor: colors[adapterName] || colors.default,
+                    label: name,
+                    data: points,
+                    borderColor: colors[name] || colors.default,
                     backgroundColor: 'transparent',
                     borderWidth: 2,
                     tension: 0.4,
                     fill: false,
                     pointRadius: 3,
                     pointHoverRadius: 5,
-                    pointBackgroundColor: colors[adapterName] || colors.default
+                    pointBackgroundColor: colors[name] || colors.default
                 });
             });
-            
-            console.log(`✅ 构建完成: ${datasets.length} 个数据集`);
+
             return datasets;
         },
 
         initChart(data) {
-            console.log('🎨 初始化图表');
-            
-            const canvas = this.$refs.chartCanvas;
-            if (!canvas) {
-                console.error('❌ 找不到 canvas 元素');
-                return;
-            }
+            console.log('🎨 初始化图表（重建模式）');
 
-            // 如果已有图表，先销毁
+            const canvas = this.$refs.chartCanvas;
+            if (!canvas) return;
+
             if (this.chart) {
-                console.log('销毁旧图表');
+                console.log('🗑️ 销毁旧图表');
                 this.chart.destroy();
+                this.chart = null;
             }
 
             const datasets = this.buildDatasets(data);
-            
             if (datasets.length === 0) {
-                console.warn('没有有效数据，不初始化图表');
                 this.showPlaceholder = true;
                 this.chartStatus = '无有效数据';
                 return;
             }
 
             const ctx = canvas.getContext('2d');
-            
+
             try {
-                this.chart = new Chart(ctx, {
+                // ⭐ chart 实例必须 markRaw
+                this.chart = markRaw(new Chart(ctx, {
                     type: 'line',
                     data: { datasets },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        animation: {
-                            duration: 0 // 禁用动画
-                        },
+                        animation: false,
                         scales: {
                             x: {
                                 type: 'linear',
-                                title: {
-                                    display: true,
-                                    text: '时间 (s)'
-                                },
-                                grid: {
-                                    display: true,
-                                    color: 'rgba(0, 0, 0, 0.1)'
-                                }
+                                title: { display: true, text: '时间 (s)' }
                             },
                             y: {
                                 beginAtZero: true,
-                                title: {
-                                    display: true,
-                                    text: '延迟 (ms)'
-                                },
-                                grid: {
-                                    display: true,
-                                    color: 'rgba(0, 0, 0, 0.1)'
-                                }
+                                title: { display: true, text: '延迟 (ms)' }
                             }
                         },
                         plugins: {
-                            legend: {
-                                display: true,
-                                position: 'top'
-                            },
+                            legend: { display: true },
                             tooltip: {
                                 mode: 'index',
                                 intersect: false,
                                 callbacks: {
-                                    label: function(context) {
-                                        return `${context.dataset.label}: ${context.parsed.y.toFixed(1)}ms`;
+                                    label(ctx) {
+                                        return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}ms`;
                                     }
                                 }
                             }
                         }
                     }
-                });
-                
+                }));
+
                 console.log('✅ 图表初始化成功');
                 this.showPlaceholder = false;
                 this.chartStatus = '图表就绪';
-                
-            } catch (error) {
-                console.error('❌ 图表初始化失败:', error);
+
+            } catch (e) {
+                console.error('❌ 图表初始化失败:', e);
                 this.showPlaceholder = true;
                 this.chartStatus = '初始化失败';
-            }
-        },
-
-        updateChart(data) {
-            console.log('🔄 更新图表数据');
-            
-            if (!this.chart) {
-                console.warn('图表不存在，重新初始化');
-                this.initChart(data);
-                return;
-            }
-            
-            const newDatasets = this.buildDatasets(data);
-            
-            if (newDatasets.length === 0) {
-                console.warn('没有有效数据，显示占位符');
-                this.showPlaceholder = true;
-                return;
-            }
-            
-            try {
-                this.chart.data.datasets = newDatasets;
-                this.chart.update('none');
-                console.log('✅ 图表更新成功');
-                this.showPlaceholder = false;
-                this.chartStatus = '数据更新成功';
-            } catch (error) {
-                console.error('❌ 图表更新失败:', error);
-                // 如果更新失败，重新初始化
-                this.initChart(data);
             }
         }
     },
@@ -302,15 +214,9 @@ export default {
     mounted() {
         console.log('🚀 LatencyChart 组件挂载完成');
         this.mountedReady = true;
-        
-        // 如果初始有数据，立即初始化图表
+
         if (this.checkDataHasContent(this.chartData)) {
-            console.log('初始有数据，立即初始化图表');
-            this.$nextTick(() => {
-                this.initChart(this.chartData);
-            });
-        } else {
-            console.log('初始无数据，等待数据更新');
+            this.$nextTick(() => this.initChart(this.chartData));
         }
     },
 

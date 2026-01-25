@@ -1,3 +1,5 @@
+import { createApp } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
+
 // 导入配置
 import adapterConfig from '/static/config/adapter.js';
 import { getChartConfig } from '/static/config/chart-config.js';
@@ -15,8 +17,6 @@ import SuccessChart from '/static/component/SuccessChart.js';
 import MetricsTable from '/static/component/MetricsTable.js';
 import StatusPanel from '/static/component/StatusPanel.js';
 
-// 创建Vue应用
-const { createApp } = Vue;
 
 // 创建全局配置对象
 const globalConfig = {
