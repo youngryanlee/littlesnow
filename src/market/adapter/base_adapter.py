@@ -1,3 +1,5 @@
+# src/market/adapter/base_adapter.py
+
 from abc import abstractmethod
 from typing import Optional, Union
 from decimal import Decimal

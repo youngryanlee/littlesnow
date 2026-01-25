@@ -17,7 +17,7 @@ import time
 # 添加src目录到路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
-from market.monitor.service import MonitorService
+from monitor.service import MonitorService
 from market.monitor.collector import MarketMonitor
 from market.adapter.binance_adapter import BinanceAdapter
 from market.adapter.polymarket_adapter import PolymarketAdapter

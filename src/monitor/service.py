@@ -62,9 +62,6 @@ class MonitorService:
         """启动WebSocket服务器子进程"""
         try:
             # 构建app.py的路径
-            import market.monitor.backend.app as app_module
-            app_file = app_module.__file__
-
             env = os.environ.copy()
 
             # 项目结构是：
@@ -72,7 +69,7 @@ class MonitorService:
             #   src/
             #     market/
             project_root = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "..", "..", "..")
+                os.path.join(os.path.dirname(__file__), "..", "..")
             )
             src_path = os.path.join(project_root, "src")
 
@@ -86,7 +83,7 @@ class MonitorService:
             cmd = [
                 sys.executable,  # 使用当前Python解释器
                 "-m", "uvicorn",
-                "market.monitor.backend.app:app",
+                "monitor.backend.app:app",
                 "--host", self.host,
                 "--port", str(self.port),
                 "--log-level", "info"
@@ -111,6 +108,26 @@ class MonitorService:
                         logger.debug(f"[WebSocket Server] {output.strip()}")
                     if self.websocket_process.poll() is not None:
                         break
+            '''
+            def read_output():
+                """实时读取子进程输出"""
+                try:
+                    # 读取所有输出，直到进程结束
+                    for line in iter(self.websocket_process.stdout.readline, ''):
+                        if line:
+                            line = line.strip()
+                            # 按日志级别输出
+                            if 'error' in line.lower() or 'traceback' in line.lower():
+                                logger.error(f"[Uvicorn] {line}")
+                            elif 'warning' in line.lower():
+                                logger.warning(f"[Uvicorn] {line}")
+                            elif 'started' in line.lower():
+                                logger.info(f"[Uvicorn] {line}")
+                            else:
+                                logger.debug(f"[Uvicorn] {line}")
+                except Exception as e:
+                    logger.error(f"读取子进程输出出错: {e}")
+            '''                    
             
             thread = threading.Thread(target=read_output, daemon=True)
             thread.start()
